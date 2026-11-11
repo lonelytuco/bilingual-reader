@@ -74,3 +74,6 @@ create policy "own book files update" on storage.objects
 drop policy if exists "own book files delete" on storage.objects;
 create policy "own book files delete" on storage.objects
   for delete using (bucket_id = 'books' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- Подстройка позиций Kindle (добавлено позже; безопасно запускать повторно)
+alter table public.editions add column if not exists kindle_anchors jsonb;

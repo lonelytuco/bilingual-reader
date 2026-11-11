@@ -6,6 +6,7 @@ import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabas
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
 import { sentencesOf, locate, mapPos, countSentences, pointAt, norm, type Sent } from "@/lib/align";
 import { translate } from "@/lib/translate";
+import { buildModel, kindleToCfi, estimateFromRendition, estimateToLoc, addAnchor, type KModel, type KAnchor } from "@/lib/kindle";
 
 type Mark = { cfi: string; text: string };
 type Jump = { cfi?: string; percent?: number; highlight?: Mark } | null;
@@ -43,9 +44,10 @@ function decorate(doc: Document, font: string, dark: boolean) {
   link.rel = "stylesheet";
   link.href = `${window.location.origin}/fonts/fonts.css`;
   (doc as any).__fontsReady = new Promise<void>((res) => {
-    link.onload = () => { (doc as any).fonts?.ready.then(() => res()) ?? res(); };
-    link.onerror = () => res();
-    setTimeout(res, 3000);
+    const done = () => { (doc as any).__fontsDone = true; res(); };
+    link.onload = () => { (doc as any).fonts?.ready.then(done) ?? done(); };
+    link.onerror = done;
+    setTimeout(done, 3000);
   });
   doc.head.appendChild(link);
   const style = doc.createElement("style");
@@ -105,6 +107,7 @@ export default function Reader({ pairId }: { pairId: string }) {
   const pagesRef = useRef<{ key: string; counts: number[] } | null>(null);
   const pagTokenRef = useRef(0);
   const hlRef = useRef<string | null>(null);
+  const navTok = useRef(0); // номер последнего перехода (чтобы не мешать, если пользователь уже листает дальше)
   const [theme, dark] = useTheme();
   darkRef.current = dark;
 
@@ -126,6 +129,10 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [altIdx, setAltIdx] = useState(0);
   const [xBusy, setXBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Kindle
+  const modelsRef = useRef(new Map<string, Promise<KModel>>());
+  const estRef = useRef<number | null>(null); // оценка текущей страницы (до подстройки)
+  const [kHint, setKHint] = useState<string | null>(null);
 
   const edition = editions.find((e) => e.id === editionId) ?? null;
   editionRef.current = edition;
@@ -221,6 +228,35 @@ export default function Reader({ pairId }: { pairId: string }) {
     indexRef.current.set(ed.id, p);
     return p;
   }, [getBook]);
+
+  // ——— Kindle ———
+  const getModel = useCallback((ed: Edition): Promise<KModel> => {
+    const c = modelsRef.current.get(ed.id);
+    if (c) return c;
+    const p = getBook(ed).then(buildModel);
+    p.catch(() => modelsRef.current.delete(ed.id));
+    modelsRef.current.set(ed.id, p);
+    return p;
+  }, [getBook]);
+
+  const anchorsOf = useCallback((ed: Edition): KAnchor[] => {
+    if (ed.kindle_anchors?.length) return ed.kindle_anchors;
+    try { return JSON.parse(localStorage.getItem(`kanc:${ed.id}`) ?? "[]"); } catch { return []; }
+  }, []);
+
+  /** Пересчитать подсказку «на Kindle ≈ Loc …» для текущей страницы */
+  const updateKindleHint = useCallback(async (loc: any) => {
+    const ed = editionRef.current, r = rendRef.current;
+    if (!ed || !r || !loc?.start || !ed.kindle_total_locs) { setKHint(null); estRef.current = null; return; }
+    try {
+      const m = await getModel(ed);
+      const est = estimateFromRendition(r, m, loc.start.cfi, loc.start.index);
+      estRef.current = est;
+      if (est != null) setKHint(`Kindle ≈ ${estimateToLoc(est, anchorsOf(ed), ed.kindle_total_locs)}`);
+    } catch { /* модель ещё не готова */ }
+  }, [getModel, anchorsOf]);
+  const kHintRef = useRef(updateKindleHint);
+  kHintRef.current = updateKindleHint;
 
   // Размер страницы — целые чётные пиксели (иначе колонки «плывут» и листание сбивается)
   const measure = useCallback(() => {
@@ -354,6 +390,7 @@ export default function Reader({ pairId }: { pairId: string }) {
         setCfi(c); setPercent(p);
         lastLocRef.current = loc;
         showPage(loc);
+        kHintRef.current(loc);
         save(c, p, ed.id);
       });
 
@@ -362,7 +399,7 @@ export default function Reader({ pairId }: { pairId: string }) {
       let target: string | undefined;
       if (j?.cfi) target = j.cfi;
       else if (j?.percent != null) target = book.locations.cfiFromPercentage(j.percent);
-      await rendition.display(target);
+      await displayAt(target);
       if (cancelled) return;
       setStatus(null);
       if (j?.highlight) addHighlight(j.highlight);
@@ -375,6 +412,26 @@ export default function Reader({ pairId }: { pairId: string }) {
   // Убираем отображение при уходе со страницы
   useEffect(() => () => { pagTokenRef.current++; disposeRef.current?.(); }, []);
 
+  /** Ждём, пока шрифты на отображаемой странице догрузятся (иначе текст «переливается» на другие страницы) */
+  async function fontsSettled(r: any) {
+    const docs = (r.getContents?.() ?? []).map((c: any) => c.document).filter(Boolean);
+    const pending = docs.filter((d: any) => d.__fontsReady && !d.__fontsDone).map((d: any) => d.__fontsReady);
+    if (!pending.length) return false;
+    await Promise.all(pending);
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(() => res(null))));
+    return true;
+  }
+
+  /** Открыть место и, если шрифт догрузился позже, ещё раз точно встать на него */
+  const displayAt = useCallback(async (target?: string) => {
+    const r = rendRef.current;
+    if (!r) return;
+    const tok = ++navTok.current;
+    await r.display(target);
+    const at = target ?? r.currentLocation?.()?.start?.cfi;
+    if (await fontsSettled(r) && tok === navTok.current && at) await r.display(at);
+  }, []);
+
   // После смены шрифта/размера/экрана: остаться на том же месте и пересчитать страницы
   const relayout = useCallback(() => {
     const r = rendRef.current;
@@ -383,10 +440,10 @@ export default function Reader({ pairId }: { pairId: string }) {
     pagTokenRef.current++;
     setPage(null);
     setTimeout(async () => {
-      try { await r.display(at); } catch {}
+      try { await displayAt(at); } catch {}
       paginate();
     }, 300);
-  }, [paginate]);
+  }, [paginate, displayAt]);
 
   // Размер шрифта
   useEffect(() => {
@@ -443,7 +500,10 @@ export default function Reader({ pairId }: { pairId: string }) {
     turning.current = true;
     try {
       if (!el || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        const tok = ++navTok.current;
         await (dir > 0 ? r.next() : r.prev());
+        const startCfi = r.currentLocation?.()?.start?.cfi;
+        fontsSettled(r).then((changed) => { if (changed && tok === navTok.current && startCfi) r.display(startCfi); });
         return;
       }
       const shift = 28;
@@ -457,8 +517,12 @@ export default function Reader({ pairId }: { pairId: string }) {
       //    неправильно определяет, какая страница на экране, и «перескакивает»
       el.style.transition = "none";
       el.style.transform = "none";
+      const tok = ++navTok.current;
       try { await (dir > 0 ? r.next() : r.prev()); } catch {}
       await raf(); await raf(); // epub.js сообщает новую позицию в следующем кадре
+      // новая глава ещё догружает шрифт → после этого возвращаемся к той же первой строке
+      const startCfi = r.currentLocation?.()?.start?.cfi;
+      fontsSettled(r).then((changed) => { if (changed && tok === navTok.current && startCfi) r.display(startCfi); });
       // 3) новая страница выезжает с другой стороны
       el.style.transform = `translateX(${dir > 0 ? shift : -shift}px)`;
       void el.offsetWidth;
@@ -505,7 +569,42 @@ export default function Reader({ pairId }: { pairId: string }) {
   function goToPercent(p: number) {
     const book = bookRef.current;
     if (!book) return;
-    rendRef.current?.display(book.locations.cfiFromPercentage(Math.min(Math.max(p, 0), 0.9999)));
+    displayAt(book.locations.cfiFromPercentage(Math.min(Math.max(p, 0), 0.9999)));
+  }
+
+  /** Перейти на Loc с Kindle (в той версии, что на Kindle) */
+  async function goKindle(edId: string, loc: number, total: number) {
+    const ed = editions.find((e) => e.id === edId);
+    if (!ed) return;
+    try {
+      setNotice(null);
+      const [book, m] = await Promise.all([getBook(ed), getModel(ed)]);
+      const target = kindleToCfi(book, m, anchorsOf(ed), loc, total);
+      if (!target) throw new Error("не нашёл место");
+      setAlts([]);
+      clearHighlight();
+      if (ed.id === editionId) await displayAt(target);
+      else { jumpRef.current = { cfi: target }; setEditionId(ed.id); }
+      setNotice(`Открыл Loc ${loc}. Если на Kindle на этой странице другой номер — открой Kindle-панель и нажми «Подстроить», дальше будет точно.`);
+    } catch (e) {
+      setNotice("Ошибка: " + (e as Error).message);
+    }
+  }
+
+  /** Подстройка: «текущая страница на Kindle — это Loc …» */
+  async function calibrateKindle(edId: string, loc: number, total: number) {
+    const ed = editions.find((e) => e.id === edId);
+    if (!ed || ed.id !== editionId) { setNotice("Для подстройки открой на сайте ту же языковую версию, что и на Kindle."); return; }
+    if (estRef.current == null) await updateKindleHint(lastLocRef.current);
+    const est = estRef.current;
+    if (est == null) { setNotice("Не получилось определить текущее место — пролистай страницу и попробуй ещё раз."); return; }
+    const list = addAnchor(anchorsOf(ed), est, loc / total);
+    try { localStorage.setItem(`kanc:${ed.id}`, JSON.stringify(list)); } catch {}
+    setEditions((all) => all.map((x) => (x.id === ed.id ? { ...x, kindle_anchors: list, kindle_total_locs: total } : x)));
+    editionRef.current = { ...ed, kindle_anchors: list, kindle_total_locs: total };
+    await supabase.from("editions").update({ kindle_anchors: list, kindle_total_locs: total }).eq("id", ed.id); // без колонки просто не сохранится в облако
+    await updateKindleHint(lastLocRef.current);
+    setNotice(`Запомнил: эта страница = Loc ${loc}. Переходы с Kindle и обратно теперь будут точнее.`);
   }
 
   function switchLang(id: string) {
@@ -521,7 +620,7 @@ export default function Reader({ pairId }: { pairId: string }) {
     if (remote.edition_id && remote.edition_id !== editionId) {
       jumpRef.current = { cfi: remote.cfi ?? undefined, percent: remote.percent ?? undefined };
       setEditionId(remote.edition_id);
-    } else if (remote.cfi) rendRef.current?.display(remote.cfi);
+    } else if (remote.cfi) displayAt(remote.cfi);
     setRemote(null);
   }
 
@@ -549,7 +648,7 @@ export default function Reader({ pairId }: { pairId: string }) {
     const m = alts[k];
     if (!m) return;
     setAltIdx(k);
-    rendRef.current?.display(m.cfi).then(() => addHighlight(m));
+    displayAt(m.cfi).then(() => addHighlight(m));
   }
 
   function clearHighlight() {
@@ -634,9 +733,6 @@ export default function Reader({ pairId }: { pairId: string }) {
     }
   }
 
-  const kindleHints = editions
-    .filter((e) => e.kindle_total_locs)
-    .map((e) => `Kindle ${e.lang} ≈ ${Math.max(1, Math.round(percent * e.kindle_total_locs!))}`);
 
   const marked = sel ?? hl;
 
@@ -704,7 +800,9 @@ export default function Reader({ pairId }: { pairId: string }) {
 
       {panel === "kindle" && edition && (
         <KindlePanel edition={edition} editions={editions}
-          onGo={(p) => { goToPercent(p); setPanel(null); }}
+          onGo={(id, loc, total) => { goKindle(id, loc, total); setPanel(null); }}
+          onPercent={(p) => { goToPercent(p); setPanel(null); }}
+          onCalibrate={(id, loc, total) => { calibrateKindle(id, loc, total); setPanel(null); }}
           onSaveTotal={(id, total) => setEditions((all) => all.map((x) => (x.id === id ? { ...x, kindle_total_locs: total } : x)))} />
       )}
       {panel === "type" && (
@@ -731,7 +829,7 @@ export default function Reader({ pairId }: { pairId: string }) {
         </div>
       )}
       {panel === "search" && (
-        <SearchPanel book={bookRef.current} onGo={(c) => { rendRef.current?.display(c); setPanel(null); }} />
+        <SearchPanel book={bookRef.current} onGo={(c) => { displayAt(c); setPanel(null); }} />
       )}
 
       {/* Страница книги */}
@@ -756,7 +854,7 @@ export default function Reader({ pairId }: { pairId: string }) {
           </div>
           <div className="mt-0.5 text-xs text-muted opacity-80">
             {Math.round(percent * 100)}%
-            {kindleHints.length > 0 && <> · {kindleHints.join(" · ")}</>}
+            {kHint && <> · {kHint}</>}
           </div>
         </div>
         <button className="btn-ghost px-5" onClick={() => turn(1)}>›</button>
@@ -765,35 +863,49 @@ export default function Reader({ pairId }: { pairId: string }) {
   );
 }
 
-function KindlePanel({ edition, editions, onGo, onSaveTotal }: {
+function KindlePanel({ edition, editions, onGo, onPercent, onCalibrate, onSaveTotal }: {
   edition: Edition; editions: Edition[];
-  onGo: (p: number) => void; onSaveTotal: (id: string, total: number) => void;
+  onGo: (edId: string, loc: number, total: number) => void;
+  onPercent: (p: number) => void;
+  onCalibrate: (edId: string, loc: number, total: number) => void;
+  onSaveTotal: (id: string, total: number) => void;
 }) {
-  const [edId, setEdId] = useState(edition.id);
+  const [edId, setEdId] = useState(edition.kindle_total_locs ? edition.id : (editions.find((e) => e.kindle_total_locs)?.id ?? edition.id));
   const ed = editions.find((e) => e.id === edId)!;
   const [loc, setLoc] = useState("");
   const [total, setTotal] = useState(ed.kindle_total_locs ? String(ed.kindle_total_locs) : "");
   const [pct, setPct] = useState("");
+  const [cal, setCal] = useState("");
 
-  async function go() {
-    if (pct) return onGo(Number(pct.replace(",", ".")) / 100);
-    const l = Number(loc), t = Number(total);
-    if (!l || !t) return;
+  async function saveTotal(t: number) {
     if (t !== ed.kindle_total_locs) {
       await supabase.from("editions").update({ kindle_total_locs: t }).eq("id", ed.id);
       onSaveTotal(ed.id, t);
     }
-    onGo(l / t);
   }
+  async function go() {
+    if (pct) return onPercent(Number(pct.replace(",", ".")) / 100);
+    const l = Number(loc), t = Number(total);
+    if (!l || !t) return;
+    await saveTotal(t);
+    onGo(ed.id, l, t);
+  }
+  async function calibrate() {
+    const l = Number(cal), t = Number(total);
+    if (!l || !t) return;
+    await saveTotal(t);
+    onCalibrate(ed.id, l, t);
+  }
+  const calibrated = (ed.kindle_anchors?.length ?? 0) > 0;
 
   return (
     <div className="space-y-3 border-b border-line bg-card/60 px-4 py-3 text-sm">
       <div className="text-muted">
-        Открой в Kindle меню → внизу будет «Loc 1234 of 5678» (или «Позиция … из …»). Введи оба числа.
-        Общее число запомнится — дальше достаточно вводить только позицию.
+        На Kindle открой меню — внизу «Loc 2115 of 18426» (или «Позиция … из …»). Введи оба числа;
+        общее число запомнится.
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <span>В Kindle книга на</span>
+        <span>Книга на Kindle —</span>
         <select className="input w-20 py-1" value={edId}
           onChange={(e) => { setEdId(e.target.value); const n = editions.find((x) => x.id === e.target.value); setTotal(n?.kindle_total_locs ? String(n.kindle_total_locs) : ""); }}>
           {editions.map((e) => <option key={e.id} value={e.id}>{e.lang}</option>)}
@@ -805,8 +917,15 @@ function KindlePanel({ edition, editions, onGo, onSaveTotal }: {
         <input className="input w-20 py-1" inputMode="decimal" placeholder="%" value={pct} onChange={(e) => setPct(e.target.value)} />
         <button className="btn-primary py-1" onClick={go}>Перейти</button>
       </div>
+      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+        <span>Подстройка: эта страница на Kindle —</span>
+        <input className="input w-24 py-1" inputMode="numeric" placeholder="Loc" value={cal} onChange={(e) => setCal(e.target.value)} />
+        <button className="btn-ghost py-1" onClick={calibrate} disabled={!total}>Подстроить</button>
+        {calibrated && <span className="text-muted">✓ подстроено ({ed.kindle_anchors!.length})</span>}
+      </div>
       <div className="text-muted">
-        Позиция примерная (± страница). Для точного места используй 🔍 — поиск по фразе с экрана Kindle.
+        Если после перехода на Kindle на той же странице другой Loc — введи его в «Подстройку».
+        Одной-двух подстроек (в начале и дальше по книге) обычно хватает, чтобы попадать точно.
       </div>
     </div>
   );

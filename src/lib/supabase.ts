@@ -19,6 +19,7 @@ export type Edition = {
   lang: string;
   file_path: string;
   kindle_total_locs: number | null;
+  kindle_anchors?: [number, number][] | null;
   locations: string | null;
 };
 export type Progress = {
