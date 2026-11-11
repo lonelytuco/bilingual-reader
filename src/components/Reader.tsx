@@ -51,6 +51,10 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [percent, setPercent] = useState(0);
   const [page, setPage] = useState<{ n: number; total: number; chapterLeft: number | null } | null>(null);
   const animRef = useRef<HTMLDivElement>(null);
+  // Для подсчёта экранных страниц
+  const cppRef = useRef<number[]>([]);          // сколько знаков помещается на один экран (замеры)
+  const sectionStartRef = useRef<number[]>([]); // номер куска (1000 знаков), с которого начинается каждая глава
+  const lastLocRef = useRef<any>(null);
   const turning = useRef(false);
   const [cfi, setCfi] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState(110);
@@ -128,6 +132,23 @@ export default function Reader({ pairId }: { pairId: string }) {
       }
       if (cancelled) return;
 
+      // Где начинается каждая глава (в кусках по ~1000 знаков) — для сквозного номера страницы
+      {
+        const { EpubCFI } = (await import("epubjs")) as any;
+        const locs: string[] = book.locations._locations ?? [];
+        const starts: number[] = [];
+        locs.forEach((c: string, i: number) => {
+          const sp = new EpubCFI(c).spinePos;
+          if (sp >= 0 && starts[sp] === undefined) starts[sp] = i;
+        });
+        // у глав без своих кусков берём начало следующей
+        for (let i = starts.length - 1, next = locs.length; i >= 0; i--) {
+          if (starts[i] === undefined) starts[i] = next; else next = starts[i];
+        }
+        sectionStartRef.current = starts;
+        cppRef.current = [];
+      }
+
       const rendition = book.renderTo(viewRef.current!, {
         width: "100%", height: "100%", spread: "none", flow: "paginated",
       });
@@ -159,6 +180,10 @@ export default function Reader({ pairId }: { pairId: string }) {
         doc.head.appendChild(tstyle);
         let x0 = 0, y0 = 0;
         doc.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+        doc.addEventListener("touchmove", (e) => {
+          const dx = e.touches[0].clientX - x0, dy = e.touches[0].clientY - y0;
+          if (Math.abs(dx) > Math.abs(dy)) e.preventDefault(); // не даём Safari самому прокручивать колонки
+        }, { passive: false });
         doc.addEventListener("touchend", (e) => {
           const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
           if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) turnRef.current(dx < 0 ? 1 : -1);
@@ -170,13 +195,8 @@ export default function Reader({ pairId }: { pairId: string }) {
         const c = loc.start.cfi as string;
         const p = book.locations.percentageFromCfi(c) ?? 0;
         setCfi(c); setPercent(p);
-        const n = book.locations.locationFromCfi(c);
-        const d = loc.start.displayed;
-        setPage({
-          n: Math.max(1, n + 1),
-          total: (book.locations.total ?? 0) + 1,
-          chapterLeft: d && d.total ? Math.max(0, d.total - d.page) : null,
-        });
+        lastLocRef.current = loc;
+        updatePages(loc);
         save(c, p, ed.id);
       });
 
@@ -192,11 +212,60 @@ export default function Reader({ pairId }: { pairId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editionId]);
 
+  // Экранные страницы: меряем, сколько знаков влезает на экран при текущем шрифте,
+  // и считаем по этому всю книгу. Внутри главы номер точный, между главами — оценка.
+  const updatePages = useCallback((loc: any) => {
+    const book = bookRef.current, r = rendRef.current;
+    if (!book || !r || !loc?.start) return;
+    const d = loc.start.displayed;
+    const idx: number = loc.start.index;
+    const view = r.getContents?.().find((c: any) => c.sectionIndex === idx) ?? r.getContents?.()[0];
+    const chars = view?.document?.body?.textContent?.replace(/\s+/g, " ").length ?? 0;
+    if (d?.total >= 3 && chars > 1500) {
+      cppRef.current.push(chars / d.total);
+      if (cppRef.current.length > 12) cppRef.current.shift();
+    }
+    const samples = cppRef.current;
+    const cpp = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length
+      : chars && d?.total ? Math.max(300, chars / d.total) : 1500;
+    const totalChars = ((book.locations.total ?? 0) + 1) * 1000;
+    const total = Math.max(1, Math.round(totalChars / cpp));
+    const startChunk = sectionStartRef.current[idx] ?? 0;
+    const n = Math.round((startChunk * 1000) / cpp) + (d?.page ?? 1);
+    setPage({
+      n: Math.min(Math.max(1, n), total),
+      total,
+      chapterLeft: d && d.total ? Math.max(0, d.total - d.page) : null,
+    });
+  }, []);
+
+  // После смены шрифта/размера/окна: остаться на том же месте и пересчитать страницы
+  const relayout = useCallback(() => {
+    const r = rendRef.current;
+    const at = lastLocRef.current?.start?.cfi;
+    if (!r || !at) return;
+    cppRef.current = [];
+    setTimeout(async () => {
+      try { await r.display(at); } catch {}
+      const loc = r.currentLocation?.();
+      if (loc?.start) { lastLocRef.current = loc; updatePages(loc); }
+    }, 250);
+  }, [updatePages]);
+
   // Размер шрифта
   useEffect(() => {
     rendRef.current?.themes.fontSize(`${fontSize}%`);
     try { localStorage.setItem("fontSize", String(fontSize)); } catch {}
-  }, [fontSize]);
+    relayout();
+  }, [fontSize, relayout]);
+
+  // Поворот iPad / изменение окна на Mac
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout>;
+    const onResize = () => { clearTimeout(t); t = setTimeout(relayout, 300); };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [relayout]);
 
   // Выбор шрифта: применяем к уже открытым страницам и запоминаем
   useEffect(() => {
@@ -207,7 +276,8 @@ export default function Reader({ pairId }: { pairId: string }) {
       const el = c.document?.getElementById("user-font");
       if (el) el.textContent = fontCss(font);
     }
-  }, [font]);
+    relayout();
+  }, [font, relayout]);
 
   // Тема: перекрашиваем уже открытые страницы
   useEffect(() => {
