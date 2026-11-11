@@ -171,35 +171,72 @@ export type Hit = { start: number; end: number; score: number; sim: number };
  * Близость к ожидаемому месту — мягкий бонус, а не жёсткий фильтр (версии бывают сдвинуты).
  * Возвращает до 3 лучших непересекающихся вариантов.
  */
+export type Shape = {
+  paras?: number;   // сколько абзацев задето выделением
+  whole?: boolean;  // выделены абзацы целиком (от начала до конца)
+};
+
 export function locate(
-  sents: Sent[], translated: string, expectedPos: number, targetLen: number, truncated: boolean, srcSentences = 1,
+  sents: Sent[], translated: string, expectedPos: number, targetLen: number, truncated: boolean,
+  srcSentences = 1, shape: Shape = {},
 ): Hit[] {
   const q = tokens(translated);
   if (!q.length || !sents.length) return [];
   const idf = buildIdf(sents);
   const dflt = Math.log(1 + sents.length); // слово, которого нет в книге, — «редкое»
-  const qLen = Math.max(20, translated.length);
-  const maxLen = Math.max(qLen * 1.5, 60);
+  const near = (i: number) => 1 / (1 + ((sents[i].pos - expectedPos) / 0.08) ** 2);
+  const P = Math.max(1, shape.paras ?? 1);
   const hits: Hit[] = [];
-  for (let i = 0; i < sents.length; i++) {
-    const d = Math.abs(sents[i].pos - expectedPos);
-    const near = 1 / (1 + (d / 0.08) ** 2);
-    let len = 0;
-    let tok: string[] = [];
-    let best: Hit | null = null;
-    for (let j = i; j < sents.length && j < i + 15; j++) {
-      if (j > i && sents[j].sec !== sents[i].sec) break;
-      len += sents[j].text.length + 1;
-      tok = tok.concat(sents[j].tok);
-      const sim = weighted(q, tok, idf, dflt);
-      // смысл важнее места; число предложений обычно совпадает с выделением
-      const shape = Math.pow(0.85, Math.abs(j - i + 1 - srcSentences));
-      const score = sim * (0.55 + 0.45 * near) * shape;
-      if (!best || score > best.score) best = { start: i, end: j, score, sim };
-      if (len > maxLen) break;
+
+  if (shape.whole) {
+    // Выделены абзацы целиком → ответ тоже целые абзацы (переводчики книг почти всегда сохраняют абзацы)
+    const paras: { start: number; end: number }[] = [];
+    for (let i = 0; i < sents.length; i++) {
+      const last = paras[paras.length - 1];
+      if (last && sents[last.end].el === sents[i].el) last.end = i;
+      else paras.push({ start: i, end: i });
     }
-    if (best) hits.push(best);
+    for (let a = 0; a < paras.length; a++) {
+      let tok: string[] = [];
+      for (let k = 1; k <= P + 1 && a + k - 1 < paras.length; k++) {
+        const pr = paras[a + k - 1];
+        if (sents[pr.start].sec !== sents[paras[a].start].sec) break;
+        for (let i = pr.start; i <= pr.end; i++) tok = tok.concat(sents[i].tok);
+        // если перевели только начало — сравниваем с началом абзацев, не наказывая за «лишний» хвост
+        const cmp = truncated ? tok.slice(0, Math.round(q.length * 1.3)) : tok;
+        const sim = weighted(q, cmp, idf, dflt);
+        const score = sim * (0.55 + 0.45 * near(paras[a].start)) * Math.pow(0.8, Math.abs(k - P));
+        hits.push({ start: paras[a].start, end: pr.end, score, sim });
+      }
+    }
+  } else {
+    // Часть абзаца → ищем столько же предложений подряд, не выходя за пределы абзаца (если выделение в одном абзаце)
+    const maxLen = Math.max(Math.max(20, translated.length) * 1.5, 60);
+    for (let i = 0; i < sents.length; i++) {
+      let len = 0;
+      let tok: string[] = [];
+      let best: Hit | null = null;
+      for (let j = i; j < sents.length && j < i + 15; j++) {
+        if (j > i && sents[j].sec !== sents[i].sec) break;
+        if (P === 1 && j > i && sents[j].el !== sents[i].el) break;
+        len += sents[j].text.length + 1;
+        tok = tok.concat(sents[j].tok);
+        const sim = weighted(q, tok, idf, dflt);
+        const score = sim * (0.55 + 0.45 * near(i)) * Math.pow(0.75, Math.abs(j - i + 1 - srcSentences));
+        if (!best || score > best.score) best = { start: i, end: j, score, sim };
+        if (len > maxLen && !truncated) break;
+      }
+      if (best) hits.push(best);
+    }
+    // перевели только начало длинного выделения — добираем предложения до того же количества, что выделено
+    if (truncated) {
+      for (const h of hits) {
+        while (h.end - h.start + 1 < srcSentences && h.end + 1 < sents.length &&
+               sents[h.end + 1].sec === sents[h.start].sec && (P > 1 || sents[h.end + 1].el === sents[h.start].el)) h.end++;
+      }
+    }
   }
+
   hits.sort((a, b) => b.score - a.score);
   const out: Hit[] = [];
   for (const h of hits) {
@@ -207,18 +244,7 @@ export function locate(
     out.push(h);
     if (out.length >= 3) break;
   }
-  // перевели только начало длинного выделения — дотягиваем конец до ожидаемой длины
-  if (truncated) {
-    for (const h of out) {
-      let len = 0;
-      for (let k = h.start; k <= h.end; k++) len += sents[k].text.length + 1;
-      while (h.end + 1 < sents.length && sents[h.end + 1].sec === sents[h.start].sec) {
-        const next = len + sents[h.end + 1].text.length + 1;
-        if (Math.abs(next - targetLen) >= Math.abs(len - targetLen)) break;
-        len = next; h.end++;
-      }
-    }
-  }
+  void targetLen;
   return out;
 }
 

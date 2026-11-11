@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase, deviceName, saveProgressKeepalive, type Edition, type Progress } from "@/lib/supabase";
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
-import { sentencesOf, locate, countSentences, pointAt, norm, type Sent } from "@/lib/align";
+import { sentencesOf, locate, countSentences, pointAt, norm, type Sent, type Shape } from "@/lib/align";
 import { translate } from "@/lib/translate";
 import { findCachedScene, generateScene, SceneError } from "@/lib/scene";
 import { buildModel, kindleToCfi, locFromRendition, type KModel } from "@/lib/kindle";
@@ -12,6 +12,31 @@ import { buildModel, kindleToCfi, locFromRendition, type KModel } from "@/lib/ki
 type Mark = { cfi: string; text: string };
 type Jump = { cfi?: string; percent?: number; highlight?: Mark } | null;
 type TIndex = { sents: Sent[]; total: number };
+
+/** Что выделено: сколько абзацев задето и выделены ли они целиком (от начала до конца) */
+function selectionShape(range: Range | null | undefined): Shape {
+  if (!range) return {};
+  const BLOCK = "p, li, h1, h2, h3, h4, h5, h6, blockquote, div, dd, dt, td, pre";
+  const doc = range.startContainer.ownerDocument;
+  if (!doc) return {};
+  const leaves = Array.from(doc.querySelectorAll(BLOCK)).filter((el) => !el.querySelector(BLOCK) && (el.textContent ?? "").trim());
+  const leafOf = (n: Node) => (n.nodeType === 1 ? (n as Element) : n.parentElement)?.closest(BLOCK) ?? null;
+  const text = (a: Node, ao: number, b: Node, bo: number) => {
+    try { const r = doc.createRange(); r.setStart(a, ao); r.setEnd(b, bo); return r.toString(); } catch { return ""; }
+  };
+  let ia = leaves.indexOf(leafOf(range.startContainer) as Element);
+  let ib = leaves.indexOf(leafOf(range.endContainer) as Element);
+  if (ia < 0 || ib < 0) return {};
+  const tiny = (t: string) => /^[\s\p{P}]{0,3}$/u.test(t);
+  // выделение заканчивается в самом начале следующего абзаца / начинается в самом конце предыдущего — не считаем их
+  if (ib > ia && tiny(text(leaves[ib], 0, range.endContainer, range.endOffset))) ib--;
+  if (ia < ib && tiny(text(range.startContainer, range.startOffset, leaves[ia], leaves[ia].childNodes.length))) ia++;
+  const a = leaves[ia], b = leaves[ib];
+  const whole =
+    tiny(text(a, 0, range.startContainer, range.startOffset)) &&
+    tiny(text(range.endContainer, range.endOffset, b, b.childNodes.length));
+  return { paras: ib - ia + 1, whole };
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const even = (n: number) => Math.max(200, Math.floor(n / 2) * 2);
@@ -127,7 +152,7 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [font, setFont] = useState("literata");
   const [panel, setPanel] = useState<null | "kindle" | "search" | "type">(null);
   const [remote, setRemote] = useState<Progress | null>(null);
-  const [sel, setSel] = useState<(Mark & { sec: number }) | null>(null);
+  const [sel, setSel] = useState<(Mark & { sec: number; shape?: Shape }) | null>(null);
   const [hl, setHl] = useState<Mark | null>(null);
 
   const [xBusy, setXBusy] = useState<string | null>(null);
@@ -429,7 +454,9 @@ export default function Reader({ pairId }: { pairId: string }) {
 
       rendition.on("selected", (range: string, contents: any) => {
         const text = (contents.window.getSelection()?.toString() ?? "").trim();
-        if (text.length >= 8) { setSel({ cfi: range, text, sec: contents.sectionIndex }); setNotice(null); }
+        let shape: Shape = {};
+        try { const s = contents.window.getSelection(); if (s?.rangeCount) shape = selectionShape(s.getRangeAt(0)); } catch {}
+        if (text.length >= 8) { setSel({ cfi: range, text, sec: contents.sectionIndex, shape }); setNotice(null); }
       });
 
       rendition.on("relocated", (loc: any) => {
@@ -740,7 +767,7 @@ export default function Reader({ pairId }: { pairId: string }) {
     if (!others.length) return;
     const target = others.find((e) => e.id === previewLang) ?? others[0];
     const tok = ++prevTok.current;
-    const source = { text: sel.text, sec: sel.sec };
+    const source = { text: sel.text, sec: sel.sec, shape: sel.shape };
     const t = setTimeout(async () => {
       setPreview({ target, status: "loading", source: source.text });
       try {
@@ -784,7 +811,7 @@ export default function Reader({ pairId }: { pairId: string }) {
   type Match = { mark: Mark | null; srcPos: number; mt: string; error?: string };
 
   /** Найти фрагмент во второй версии книги: текст переводчика книги + место для перехода */
-  async function computeMatch(source: { text: string; sec: number }, from: Edition, target: Edition): Promise<Match> {
+  async function computeMatch(source: { text: string; sec: number; shape?: Shape }, from: Edition, target: Edition): Promise<Match> {
     const { text } = source;
     let error: string | undefined;
     const trP = translate(text, from.lang, target.lang).catch((e: Error) => {
@@ -808,7 +835,7 @@ export default function Reader({ pairId }: { pairId: string }) {
     // Самое близкое по смыслу место в пределах ±10% книги от той же позиции
     const pool = tIdx.sents.filter((s) => Math.abs(s.pos - srcPos) <= 0.1);
     const hits = tr.text
-      ? locate(pool, tr.text, srcPos, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text))
+      ? locate(pool, tr.text, srcPos, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text), source.shape ?? {})
       : [];
     if (!hits.length || hits[0].sim < 0.1) return { mark: null, srcPos, mt: tr.text, error };
 
@@ -832,7 +859,9 @@ export default function Reader({ pairId }: { pairId: string }) {
 
   /** Из подсвеченного фрагмента — обратно в другую версию */
   async function findInOther(target: Edition) {
-    const source = sel ?? (hl ? { ...hl, sec: -1 } : null);
+    let hlShape: Shape = {};
+    if (!sel && hl) { try { hlShape = selectionShape(rendRef.current?.getRange(hl.cfi)); } catch {} }
+    const source = sel ?? (hl ? { ...hl, sec: -1, shape: hlShape } : null);
     if (!source || !edition) return;
     try {
       setXBusy("Ищу это место…");
