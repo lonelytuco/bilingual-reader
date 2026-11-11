@@ -669,14 +669,33 @@ export default function Reader({ pairId }: { pairId: string }) {
         if (tok.cancelled) return;
         if (cached) { setScene({ status: "ready", ...cached }); return; }
       }
-      // текст перед текущим местом (~2 страницы)
+      // текст на экране сейчас — это и рисуем
+      let page = "";
+      try {
+        const r = rendRef.current, loc = lastLocRef.current;
+        const a = r?.getRange(loc.start.cfi), b = r?.getRange(loc.end.cfi);
+        if (a && b) {
+          const rg = a.startContainer.ownerDocument.createRange();
+          rg.setStart(a.startContainer, a.startOffset);
+          rg.setEnd(b.endContainer, b.endOffset);
+          page = rg.toString().replace(/\s+/g, " ").trim();
+        }
+      } catch {}
+      // предыдущий текст (~6000 знаков) — контекст: кто, где, что было до этого
       const idx = await textIndex(ed);
-      const before = idx.sents.filter((s) => s.pos <= pos + 0.002);
+      const before = idx.sents.filter((s) => s.pos <= pos + 0.001);
       let text = "";
-      for (let i = before.length - 1; i >= 0 && text.length < 3500; i--) text = before[i].text + " " + text;
-      if (!text.trim()) { setScene({ status: "error", note: "Здесь пока нечего рисовать — начни читать." }); return; }
+      for (let i = before.length - 1; i >= 0 && text.length < 6000; i--) text = before[i].text + " " + text;
+      if (!text.trim() && !page) { setScene({ status: "error", note: "Здесь пока нечего рисовать — начни читать." }); return; }
+      // название и автор — из самого файла книги
+      let bookTitle = "", author = "";
+      try {
+        const md = (await getBook(ed)).packaging?.metadata ?? {};
+        bookTitle = String(md.title ?? "").trim();
+        author = String(md.creator ?? "").trim();
+      } catch {}
       const res = await generateScene({
-        pairId, editionId: ed.id, pos, title, text, signal: tok,
+        pairId, editionId: ed.id, pos, title, text: text || page, page, bookTitle, author, signal: tok,
         onCaption: (c) => { if (!tok.cancelled) setScene({ status: "loading", caption: c }); },
       });
       if (!tok.cancelled) setScene({ status: res.url ? "ready" : "error", ...res });

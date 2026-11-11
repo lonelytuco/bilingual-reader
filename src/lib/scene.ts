@@ -33,6 +33,7 @@ export class SceneError extends Error {
 /** Нарисовать новую картинку. onCaption вызывается сразу, как только готов пересказ (картинка — позже). */
 export async function generateScene(opts: {
   pairId: string; editionId: string; pos: number; title: string; text: string;
+  page?: string; bookTitle?: string; author?: string;
   onCaption?: (c: string) => void; signal?: { cancelled: boolean };
 }): Promise<Scene> {
   const t = await token();
@@ -42,7 +43,7 @@ export async function generateScene(opts: {
   const r = await fetch("/api/scene", {
     method: "POST",
     headers: { ...auth, "Content-Type": "application/json" },
-    body: JSON.stringify({ text: opts.text, title: opts.title }),
+    body: JSON.stringify({ text: opts.text, title: opts.title, page: opts.page, bookTitle: opts.bookTitle, author: opts.author }),
   });
   if (r.status === 501) throw new SceneError("not_configured", "Картинки ещё не подключены: нужен ключ Яндекса в настройках Vercel.");
   if (r.status === 401) throw new SceneError("unauthorized", "Нет доступа к рисованию (проверь ALLOWED_EMAILS в Vercel).");
