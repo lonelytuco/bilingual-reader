@@ -14,19 +14,25 @@ import { SUPABASE_URL_PUBLIC, SUPABASE_KEY_PUBLIC } from "@/lib/supabase";
 
 const API = "https://llm.api.cloud.yandex.net";
 
-// Стиль: плоский минимализм
+// Стиль: стильная современная книжная иллюстрация — простая, но с деталями, по которым узнаётся сцена
 const STYLE =
-  "Плоская минималистичная иллюстрация в стиле обложек Penguin и постеров Сола Басса: " +
-  "2–3 приглушённых цвета, крупные простые силуэты, геометричные формы, много пустого пространства, " +
-  "лёгкая бумажная текстура, без мелких деталей, без текста и надписей.";
+  "Стиль: современная книжная иллюстрация в технике плоской графики с фактурой гуаши и ризографа, " +
+  "как в иллюстрированных изданиях Penguin Clothbound и журнале The New Yorker. " +
+  "Персонажи узнаваемы: видны позы, жесты, выражения лиц, одежда. Хорошо прорисованы место действия и ключевые предметы. " +
+  "Палитра из 5–7 гармоничных приглушённых цветов, мягкий свет и тени, глубина кадра — передний, средний и задний план, " +
+  "лёгкая зернистая бумажная текстура. Не абстракция, не схематичные линии. Без текста, букв и надписей.";
 
 const SYSTEM =
   "Ты — арт-директор книжных иллюстраций. Тебе дают фрагмент книги, который читатель только что прочитал. " +
   "Выбери ОДНУ ключевую сцену из самого конца фрагмента (то, что происходит прямо сейчас). " +
   'Ответь строго JSON без пояснений: {"caption": "...", "prompt": "..."}. ' +
   "caption — по-русски, 1–2 коротких предложения: что сейчас происходит, с именами героев, чтобы читатель быстро вспомнил. " +
-  "prompt — по-русски, до 350 символов: что нарисовать (место, время суток, 1–2 фигуры и их действие, ключевой предмет, настроение). " +
-  "В prompt не используй имена собственные и названия, только описания (например «пожилой смотритель маяка»). " +
+  "prompt — подробное описание кадра для художника, по-русски, 500–900 символов. Опиши конкретно: " +
+  "кто в кадре (возраст, пол, внешность, одежда, эпоха), что каждый делает и какое у него выражение лица; " +
+  "где это происходит (обстановка, детали интерьера или пейзажа, эпоха), время суток и освещение, погода; " +
+  "2–4 ключевых предмета сцены; ракурс и композицию (например, «вид со спины героя на…», «крупный план рук»); настроение. " +
+  "Опирайся только на то, что есть в тексте, ничего не выдумывай сверх правдоподобных деталей обстановки. " +
+  "В prompt не используй имена собственные и названия, только описания (например, «пожилой смотритель маяка в вязаном свитере»). " +
   "Не описывай жестокость и откровенные сцены — выбери спокойный кадр с тем же смыслом.";
 
 async function authorize(req: Request): Promise<string | null> {
@@ -71,7 +77,7 @@ export async function POST(req: Request) {
     headers: headers(c),
     body: JSON.stringify({
       modelUri: `gpt://${c.folder}/yandexgpt/latest`,
-      completionOptions: { stream: false, temperature: 0.3, maxTokens: "600" },
+      completionOptions: { stream: false, temperature: 0.3, maxTokens: "1200" },
       messages: [
         { role: "system", text: SYSTEM },
         { role: "user", text: `Книга: «${String(title ?? "").slice(0, 200)}»\n\nФрагмент:\n${text.slice(-6000)}` },
@@ -86,7 +92,7 @@ export async function POST(req: Request) {
   const gj = await g.json();
   const out: string = gj?.result?.alternatives?.[0]?.message?.text ?? "";
   const { caption = "", prompt = "" } = parseJson(out);
-  const scene = (prompt || caption || out).replace(/\s+/g, " ").slice(0, 400);
+  const scene = (prompt || caption || out).replace(/\s+/g, " ").slice(0, 1200);
 
   return Response.json({ caption, prompt: `${scene} ${STYLE}` });
 }
@@ -108,7 +114,7 @@ async function drawImage(c: { key: string; folder: string }, prompt: string) {
       const r = await fetch("https://ai.api.cloud.yandex.net/v1/images/generations", {
         method: "POST",
         headers: { Authorization: combo.auth, "OpenAI-Project": c.folder, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: `art://${c.folder}/${combo.model}`, prompt: prompt.slice(0, 1000), size }),
+        body: JSON.stringify({ model: `art://${c.folder}/${combo.model}`, prompt: combo.model.startsWith("yandex-art/") ? prompt.slice(0, 500) : prompt.slice(0, 2500), size }),
       });
       const text = await r.text();
       if (r.ok) {
