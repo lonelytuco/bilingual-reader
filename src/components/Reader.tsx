@@ -4,8 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabase";
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
+import { sentencesOf, findBest, pointAt, type Sent } from "@/lib/align";
+import { translate } from "@/lib/translate";
 
-type Jump = { cfi?: string; percent?: number } | null;
+type Jump = { cfi?: string; percent?: number; highlight?: string } | null;
+type Loaded = { book: any; starts: number[] };
 
 // Шрифты лежат в /public/fonts (латиница + кириллица), "book" — оставить шрифт издательства
 export const FONTS: { id: string; name: string; css: string | null }[] = [
@@ -61,6 +64,12 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [font, setFont] = useState("literata");
   const [panel, setPanel] = useState<null | "kindle" | "search" | "type">(null);
   const [remote, setRemote] = useState<Progress | null>(null);
+  // Выделение и переход в другую версию
+  const booksRef = useRef(new Map<string, Promise<Loaded>>());
+  const [sel, setSel] = useState<{ cfi: string; text: string } | null>(null);
+  const [xBusy, setXBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const hlRef = useRef<string | null>(null);
 
   const edition = editions.find((e) => e.id === editionId) ?? null;
 
@@ -102,6 +111,44 @@ export default function Reader({ pairId }: { pairId: string }) {
     [pairId]
   );
 
+  // Загрузка книги одной версии (кэшируется: нужна и для чтения, и для поиска места)
+  const getBook = useCallback((ed: Edition, onStatus?: (s: string) => void): Promise<Loaded> => {
+    const cached = booksRef.current.get(ed.id);
+    if (cached) return cached;
+    const p = (async () => {
+      const { data: blob, error } = await supabase.storage.from("books").download(ed.file_path);
+      if (error || !blob) throw new Error("Не удалось скачать файл: " + error?.message);
+      const mod = (await import("epubjs")) as any;
+      const book = mod.default(await blob.arrayBuffer());
+      await book.ready;
+      // Разметка позиций: считается один раз и сохраняется в базе для всех устройств
+      if (ed.locations) {
+        book.locations.load(ed.locations);
+      } else {
+        onStatus?.("Размечаю книгу (только в первый раз, ~10–30 сек)…");
+        await book.locations.generate(1000);
+        const json = book.locations.save();
+        await supabase.from("editions").update({ locations: json }).eq("id", ed.id);
+        setEditions((all) => all.map((x) => (x.id === ed.id ? { ...x, locations: json } : x)));
+      }
+      // Где начинается каждая глава (в кусках по ~1000 знаков)
+      const locs: string[] = book.locations._locations ?? [];
+      const starts: number[] = [];
+      locs.forEach((c: string, i: number) => {
+        const sp = new mod.EpubCFI(c).spinePos;
+        if (sp >= 0 && starts[sp] === undefined) starts[sp] = i;
+      });
+      const nSec = book.spine.spineItems.length;
+      for (let i = nSec - 1, next = locs.length; i >= 0; i--) {
+        if (starts[i] === undefined) starts[i] = next; else next = starts[i];
+      }
+      return { book, starts };
+    })();
+    p.catch(() => booksRef.current.delete(ed.id));
+    booksRef.current.set(ed.id, p);
+    return p;
+  }, []);
+
   // 3. Открываем выбранную языковую версию
   useEffect(() => {
     if (!edition || !viewRef.current) return;
@@ -110,44 +157,13 @@ export default function Reader({ pairId }: { pairId: string }) {
     (async () => {
       setStatus("Открываю книгу…");
       rendRef.current?.destroy?.();
-      bookRef.current?.destroy?.();
       viewRef.current!.innerHTML = "";
 
-      const { data: blob, error } = await supabase.storage.from("books").download(ed.file_path);
-      if (error || !blob) return setStatus("Не удалось скачать файл: " + error?.message);
-      const ePub = (await import("epubjs")).default as any;
-      const book = ePub(await blob.arrayBuffer());
+      const { book, starts } = await getBook(ed, setStatus);
       bookRef.current = book;
-      await book.ready;
-
-      // Разметка позиций: считается один раз и сохраняется в базе для всех устройств
-      if (ed.locations) {
-        book.locations.load(ed.locations);
-      } else {
-        setStatus("Размечаю книгу (только в первый раз, ~10–30 сек)…");
-        await book.locations.generate(1000);
-        const json = book.locations.save();
-        await supabase.from("editions").update({ locations: json }).eq("id", ed.id);
-        setEditions((all) => all.map((x) => (x.id === ed.id ? { ...x, locations: json } : x)));
-      }
+      sectionStartRef.current = starts;
+      cppRef.current = [];
       if (cancelled) return;
-
-      // Где начинается каждая глава (в кусках по ~1000 знаков) — для сквозного номера страницы
-      {
-        const { EpubCFI } = (await import("epubjs")) as any;
-        const locs: string[] = book.locations._locations ?? [];
-        const starts: number[] = [];
-        locs.forEach((c: string, i: number) => {
-          const sp = new EpubCFI(c).spinePos;
-          if (sp >= 0 && starts[sp] === undefined) starts[sp] = i;
-        });
-        // у глав без своих кусков берём начало следующей
-        for (let i = starts.length - 1, next = locs.length; i >= 0; i--) {
-          if (starts[i] === undefined) starts[i] = next; else next = starts[i];
-        }
-        sectionStartRef.current = starts;
-        cppRef.current = [];
-      }
 
       const rendition = book.renderTo(viewRef.current!, {
         width: "100%", height: "100%", spread: "none", flow: "paginated",
@@ -180,15 +196,26 @@ export default function Reader({ pairId }: { pairId: string }) {
         doc.head.appendChild(tstyle);
         let x0 = 0, y0 = 0;
         doc.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+        doc.addEventListener("selectionchange", () => {
+          if (!(doc.getSelection()?.toString() ?? "").trim()) setSel(null);
+        });
+        const hasSel = () => (doc.getSelection()?.toString() ?? "").trim().length > 0;
         doc.addEventListener("touchmove", (e) => {
+          if (hasSel()) return; // идёт выделение текста — не мешаем
           const dx = e.touches[0].clientX - x0, dy = e.touches[0].clientY - y0;
           if (Math.abs(dx) > Math.abs(dy)) e.preventDefault(); // не даём Safari самому прокручивать колонки
         }, { passive: false });
         doc.addEventListener("touchend", (e) => {
+          if (hasSel()) return;
           const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
           if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) turnRef.current(dx < 0 ? 1 : -1);
         });
         doc.addEventListener("keyup", onKey);
+      });
+
+      rendition.on("selected", (range: string, contents: any) => {
+        const text = (contents.window.getSelection()?.toString() ?? "").trim();
+        if (text.length >= 8) { setSel({ cfi: range, text }); setNotice(null); }
       });
 
       rendition.on("relocated", (loc: any) => {
@@ -207,6 +234,17 @@ export default function Reader({ pairId }: { pairId: string }) {
       else if (j?.percent != null) target = book.locations.cfiFromPercentage(j.percent);
       await rendition.display(target);
       setStatus(null);
+      if (j?.highlight) {
+        const h = j.highlight;
+        hlRef.current = h;
+        try {
+          rendition.annotations.highlight(h, {}, () => clearHighlight(), "xl-hl",
+            { fill: "#e08a5f", "fill-opacity": "0.35", "mix-blend-mode": "multiply" });
+          const range = rendition.getRange(h);
+          const win = range?.startContainer?.ownerDocument?.defaultView;
+          if (range && win) { win.getSelection()?.removeAllRanges(); win.getSelection()?.addRange(range); }
+        } catch {}
+      }
     })().catch((e) => setStatus("Ошибка: " + (e as Error).message));
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -343,6 +381,76 @@ export default function Reader({ pairId }: { pairId: string }) {
     rendRef.current.display(book.locations.cfiFromPercentage(Math.min(Math.max(p, 0), 0.9999)));
   }
 
+  function clearHighlight() {
+    if (hlRef.current) { try { rendRef.current?.annotations.remove(hlRef.current, "highlight"); } catch {} }
+    hlRef.current = null;
+  }
+
+  // Ищем выделенный фрагмент в другой языковой версии
+  async function findInOther(target: Edition) {
+    if (!sel || !edition) return;
+    const { text, cfi: selCfi } = sel;
+    try {
+      setXBusy("Перевожу…");
+      const [src, tgt] = await Promise.all([getBook(edition), getBook(target, setXBusy)]);
+      let srcPos = percent;
+      try { const p = src.book.locations.percentageFromCfi(selCfi); if (p != null && isFinite(p)) srcPos = p; } catch {}
+
+      let translated = "";
+      try { translated = await translate(text, edition.lang, target.lang); }
+      catch (e) { setNotice((e as Error).message + " Открываю примерно то же место."); }
+
+      setXBusy("Ищу это место…");
+      const tb = tgt.book;
+      const tTotal = (tb.locations.total ?? 0) + 1, sTotal = (src.book.locations.total ?? 0) + 1;
+      const targetLen = text.length * (tTotal / sTotal);
+      const nSec = tb.spine.spineItems.length;
+      const secRange = (i: number) => [
+        (tgt.starts[i] ?? tTotal) / tTotal,
+        (i + 1 < nSec ? tgt.starts[i + 1] ?? tTotal : tTotal) / tTotal,
+      ];
+
+      async function search(win: number) {
+        const sents: Sent[] = [];
+        for (let i = 0; i < nSec; i++) {
+          const [a, b] = secRange(i);
+          if (b < srcPos - win || a > srcPos + win) continue;
+          const section = tb.spine.get(i);
+          if (!section || section.linear === "no" || section.linear === false) continue;
+          await section.load(tb.load.bind(tb));
+          if (section.document) sents.push(...sentencesOf(section.document, i, a, b));
+        }
+        return { sents, res: translated ? findBest(sents, translated, srcPos, targetLen) : null };
+      }
+
+      let found = translated ? await search(0.07) : null;
+      if (translated && (!found?.res || found.res.sim < 0.18)) {
+        const wide = await search(0.2);
+        if (wide.res && (!found?.res || wide.res.sim > found.res.sim)) found = wide;
+      }
+
+      if (found?.res && found.res.sim >= 0.08) {
+        const s = found.sents[found.res.start], e = found.sents[found.res.end];
+        const range = s.el.ownerDocument.createRange();
+        range.setStart(...pointAt(s.el, s.start));
+        range.setEnd(...pointAt(e.el, e.end));
+        const hl = tb.spine.get(s.sec).cfiFromRange(range);
+        jumpRef.current = { cfi: hl, highlight: hl };
+        if (found.res.sim < 0.2) setNotice("Место найдено приблизительно — переводы заметно отличаются.");
+      } else {
+        jumpRef.current = { percent: srcPos };
+        if (translated) setNotice("Точно не нашёл — открыл примерно то же место.");
+      }
+      setSel(null);
+      clearHighlight();
+      setEditionId(target.id);
+    } catch (e) {
+      setNotice("Ошибка: " + (e as Error).message);
+    } finally {
+      setXBusy(null);
+    }
+  }
+
   function switchLang(id: string) {
     if (id === editionId) return;
     jumpRef.current = { percent };
@@ -383,6 +491,24 @@ export default function Reader({ pairId }: { pairId: string }) {
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "kindle" ? null : "kindle")}>Kindle</button>
       </header>
 
+      {(sel || xBusy) && (
+        <div className="flex items-center gap-3 border-b border-line bg-card/60 px-4 py-2 text-sm">
+          <span className="serif min-w-0 flex-1 truncate text-muted">
+            {xBusy ?? `«${sel!.text.slice(0, 80)}${sel!.text.length > 80 ? "…" : ""}»`}
+          </span>
+          {!xBusy && editions.filter((e) => e.id !== editionId).map((e) => (
+            <button key={e.id} className="btn-primary shrink-0 py-1" onClick={() => findInOther(e)}>
+              Найти в {e.lang} →
+            </button>
+          ))}
+        </div>
+      )}
+      {notice && (
+        <div className="flex items-center gap-3 bg-accent/10 px-4 py-2 text-sm">
+          <span className="flex-1">{notice}</span>
+          <button className="text-muted" onClick={() => setNotice(null)}>✕</button>
+        </div>
+      )}
       {remote && (
         <div className="flex items-center gap-3 bg-accent/10 px-4 py-2 text-sm">
           <span className="flex-1">

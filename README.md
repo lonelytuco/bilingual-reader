@@ -13,3 +13,9 @@
 1. Supabase → SQL Editor → вставить `supabase/schema.sql` → Run.
 2. Supabase → Authentication → URL Configuration → Site URL = адрес сайта на Vercel.
 3. Vercel → Import этого репозитория → Deploy.
+
+## Переход по выделенному тексту в другую версию
+Выдели текст → «Найти в EN». Фрагмент переводится (по умолчанию бесплатный MyMemory, ~5000 знаков в день),
+затем сайт ищет самое похожее место в другой версии рядом с той же позицией и открывает его с выделением.
+Чтобы переводил Claude (лучше и без дневного лимита): Vercel → Settings → Environment Variables →
+`ANTHROPIC_API_KEY` = ключ с console.anthropic.com → Redeploy.
