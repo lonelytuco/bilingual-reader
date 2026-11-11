@@ -2,6 +2,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase, type BookPair, type Edition, type Progress } from "@/lib/supabase";
+import { useTheme } from "@/lib/theme";
+import { ThemeSwitch } from "@/components/Reader";
 
 type Row = BookPair & { editions: Edition[]; progress: Progress | null };
 
@@ -10,6 +12,7 @@ const LANGS = ["EN", "RU", "DE", "FR", "ES", "IT", "PT", "JA", "ZH"];
 export default function Library({ email }: { email: string }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [theme] = useTheme();
 
   async function load() {
     const { data: pairs } = await supabase
@@ -42,6 +45,11 @@ export default function Library({ email }: { email: string }) {
           <button className="underline" onClick={() => supabase.auth.signOut()}>Выйти</button>
         </div>
       </header>
+
+      <div className="mb-6 flex items-center gap-3 text-sm">
+        <span className="text-muted">Тема</span>
+        <ThemeSwitch theme={theme} />
+      </div>
 
       {!showNew && (
         <button className="btn-primary mb-6" onClick={() => setShowNew(true)}>+ Добавить книгу</button>
@@ -125,7 +133,7 @@ function NewPair({ onDone }: { onDone: () => void }) {
   );
 
   return (
-    <form onSubmit={save} className="mb-8 space-y-3 rounded-xl border border-line bg-white/50 p-4">
+    <form onSubmit={save} className="mb-8 space-y-3 rounded-xl border border-line bg-card/50 p-4">
       <input className="input" placeholder="Название (необязательно)" value={title} onChange={(e) => setTitle(e.target.value)} />
       <Picker v={a} set={setA} label="Выбрать EPUB — версия 1" />
       <Picker v={b} set={setB} label="Выбрать EPUB — версия 2" />

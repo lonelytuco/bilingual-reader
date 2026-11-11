@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabase";
+import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
 
 type Jump = { cfi?: string; percent?: number } | null;
 
@@ -16,6 +17,14 @@ export const FONTS: { id: string; name: string; css: string | null }[] = [
   { id: "system", name: "Системный (San Francisco)", css: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
   { id: "book", name: "Как в книге", css: null },
 ];
+
+function themeCss(dark: boolean) {
+  const c = dark ? READER_COLORS.dark : READER_COLORS.light;
+  // В тёмной теме перекрашиваем весь текст (издательские цвета рассчитаны на белый фон)
+  return dark
+    ? `html, body { background: ${c.bg} !important; } body, body * { color: ${c.fg} !important; background-color: transparent !important; border-color: #3a3631 !important; } body a, body a * { color: ${c.link} !important; } img { opacity: .88; }`
+    : `html, body { background: transparent !important; color: ${c.fg} !important; } body a { color: ${c.link} !important; }`;
+}
 
 function fontCss(id: string) {
   const f = FONTS.find((x) => x.id === id);
@@ -31,6 +40,9 @@ export default function Reader({ pairId }: { pairId: string }) {
   const lastSaved = useRef<string>("");
   const me = useRef<string>("");
   const fontRef = useRef<string>("literata");
+  const darkRef = useRef<boolean>(false);
+  const [theme, dark] = useTheme();
+  darkRef.current = dark;
 
   const [title, setTitle] = useState("");
   const [editions, setEditions] = useState<Edition[]>([]);
@@ -120,8 +132,6 @@ export default function Reader({ pairId }: { pairId: string }) {
       rendition.themes.default({
         body: {
           "line-height": "1.6 !important",
-          color: "#23201b !important",
-          background: "transparent !important",
           padding: "0 8px !important",
         },
         p: { "text-align": "justify", hyphens: "auto" },
@@ -140,6 +150,10 @@ export default function Reader({ pairId }: { pairId: string }) {
         style.id = "user-font";
         style.textContent = fontCss(fontRef.current);
         doc.head.appendChild(style);
+        const tstyle = doc.createElement("style");
+        tstyle.id = "user-theme";
+        tstyle.textContent = themeCss(darkRef.current);
+        doc.head.appendChild(tstyle);
         let x0 = 0, y0 = 0;
         doc.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
         doc.addEventListener("touchend", (e) => {
@@ -184,6 +198,15 @@ export default function Reader({ pairId }: { pairId: string }) {
       if (el) el.textContent = fontCss(font);
     }
   }, [font]);
+
+  // Тема: перекрашиваем уже открытые страницы
+  useEffect(() => {
+    const contents = rendRef.current?.getContents?.() ?? [];
+    for (const c of contents) {
+      const el = c.document?.getElementById("user-theme");
+      if (el) el.textContent = themeCss(dark);
+    }
+  }, [dark]);
 
   // Стрелки на клавиатуре (MacBook)
   const onKey = useCallback((e: KeyboardEvent) => {
@@ -245,7 +268,7 @@ export default function Reader({ pairId }: { pairId: string }) {
         <div className="flex overflow-hidden rounded-lg border border-line">
           {editions.map((e) => (
             <button key={e.id} onClick={() => switchLang(e.id)}
-              className={`px-3 py-2 font-medium ${e.id === editionId ? "bg-ink text-paper" : "hover:bg-white/60"}`}>
+              className={`px-3 py-2 font-medium ${e.id === editionId ? "bg-ink text-paper" : "hover:bg-card"}`}>
               {e.lang}
             </button>
           ))}
@@ -272,18 +295,22 @@ export default function Reader({ pairId }: { pairId: string }) {
           onSaveTotal={(id, total) => setEditions((all) => all.map((x) => (x.id === id ? { ...x, kindle_total_locs: total } : x)))} />
       )}
       {panel === "type" && (
-        <div className="space-y-3 border-b border-line bg-white/60 px-4 py-3 text-sm">
+        <div className="space-y-3 border-b border-line bg-card/60 px-4 py-3 text-sm">
           <div className="flex items-center gap-3">
             <span className="w-16 text-muted">Размер</span>
             <button className="btn-ghost px-4" onClick={() => setFontSize((s) => Math.max(70, s - 10))}>A−</button>
             <span className="w-12 text-center">{fontSize}%</span>
             <button className="btn-ghost px-4" onClick={() => setFontSize((s) => Math.min(200, s + 10))}>A+</button>
           </div>
+          <div className="flex items-center gap-3">
+            <span className="w-16 text-muted">Тема</span>
+            <ThemeSwitch theme={theme} />
+          </div>
           <div className="flex flex-wrap gap-2">
             {FONTS.map((f) => (
               <button key={f.id} onClick={() => setFont(f.id)}
                 style={{ fontFamily: f.css ?? undefined }}
-                className={`rounded-lg border px-3 py-2 text-base ${f.id === font ? "border-ink bg-ink text-paper" : "border-line bg-white hover:border-ink"}`}>
+                className={`rounded-lg border px-3 py-2 text-base ${f.id === font ? "border-ink bg-ink text-paper" : "border-line bg-card hover:border-ink"}`}>
                 {f.name} · Аа
               </button>
             ))}
@@ -338,7 +365,7 @@ function KindlePanel({ edition, editions, onGo, onSaveTotal }: {
   }
 
   return (
-    <div className="space-y-3 border-b border-line bg-white/60 px-4 py-3 text-sm">
+    <div className="space-y-3 border-b border-line bg-card/60 px-4 py-3 text-sm">
       <div className="text-muted">
         Открой в Kindle меню → внизу будет «Loc 1234 of 5678» (или «Позиция … из …»). Введи оба числа.
         Общее число запомнится — дальше достаточно вводить только позицию.
@@ -386,7 +413,7 @@ function SearchPanel({ book, onGo }: { book: any; onGo: (cfi: string) => void })
   }
 
   return (
-    <div className="border-b border-line bg-white/60 px-4 py-3 text-sm">
+    <div className="border-b border-line bg-card/60 px-4 py-3 text-sm">
       <form onSubmit={run} className="flex gap-2">
         <input className="input py-1" autoFocus placeholder="3–5 слов с экрана Kindle" value={q} onChange={(e) => setQ(e.target.value)} />
         <button className="btn-primary py-1" disabled={busy}>{busy ? "…" : "Найти"}</button>
@@ -399,6 +426,19 @@ function SearchPanel({ book, onGo }: { book: any; onGo: (cfi: string) => void })
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+export function ThemeSwitch({ theme }: { theme: string }) {
+  return (
+    <div className="flex overflow-hidden rounded-lg border border-line">
+      {THEMES.map((t) => (
+        <button key={t.id} onClick={() => setTheme(t.id)}
+          className={`px-3 py-2 ${t.id === theme ? "bg-ink text-paper" : "hover:bg-card"}`}>
+          {t.name}
+        </button>
+      ))}
     </div>
   );
 }
