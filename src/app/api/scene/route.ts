@@ -1,13 +1,15 @@
 /**
- * Картинка «где мы остановились»: YandexGPT выбирает сцену и пишет пересказ, YandexART рисует.
+ * Картинка «где мы остановились»: YandexGPT выбирает сцену и пишет пересказ, Яндекс рисует.
  *
- * POST /api/scene        { text, title }  → { caption, op }   (запускает рисование)
- * GET  /api/scene?op=ID                   → { done, image? }  (base64 JPEG, когда готово)
+ * POST /api/scene  { text, title } → { caption, prompt }   (пересказ — сразу)
+ * PUT  /api/scene  { prompt }      → { image } | { error }  (картинка, base64)
  *
  * Нужны переменные окружения в Vercel: YANDEX_API_KEY, YANDEX_FOLDER_ID.
  * Необязательно: ALLOWED_EMAILS — через запятую, кому разрешено (чтобы чужие не тратили твой баланс).
  */
 import { createClient } from "@supabase/supabase-js";
+
+export const maxDuration = 60; // рисование занимает до ~30 секунд
 import { SUPABASE_URL_PUBLIC, SUPABASE_KEY_PUBLIC } from "@/lib/supabase";
 
 const API = "https://llm.api.cloud.yandex.net";
@@ -86,23 +88,58 @@ export async function POST(req: Request) {
   const { caption = "", prompt = "" } = parseJson(out);
   const scene = (prompt || caption || out).replace(/\s+/g, " ").slice(0, 400);
 
-  // 2) Запускаем рисование (асинхронно — результат забираем через GET)
-  const a = await fetch(`${API}/foundationModels/v1/imageGenerationAsync`, {
-    method: "POST",
-    headers: headers(c),
-    body: JSON.stringify({
-      modelUri: `art://${c.folder}/yandex-art/latest`,
-      generationOptions: { seed: String(Math.floor(Math.random() * 1e9)), aspectRatio: { widthRatio: "16", heightRatio: "9" } },
-      messages: [{ weight: "1", text: `${scene} ${STYLE}`.slice(0, 500) }],
-    }),
-  });
-  if (!a.ok) {
-    const detail = (await a.text()).slice(0, 500);
-    console.error("YandexART start failed", a.status, detail);
-    return Response.json({ caption, error: "art_failed", detail: `${a.status}: ${detail}` }, { status: 200 });
+  return Response.json({ caption, prompt: `${scene} ${STYLE}` });
+}
+
+/**
+ * Рисование через новый OpenAI-совместимый API Яндекса (картинка приходит сразу в ответе).
+ * Пробуем по очереди модели и способы авторизации, пока не получится; запоминаем рабочий вариант.
+ */
+const MODELS = ["aliceai-image-art-3.0", "yandex-art-2.0/latest", "yandex-art/latest"];
+let working: { model: string; auth: string } | null = null;
+
+async function drawImage(c: { key: string; folder: string }, prompt: string) {
+  const all = MODELS.flatMap((model) => [{ model, auth: `Api-Key ${c.key}` }, { model, auth: `Bearer ${c.key}` }]);
+  const w = working;
+  const combos = w ? [w, ...all.filter((x) => x.model !== w.model || x.auth !== w.auth)] : all;
+  const errors: string[] = [];
+  for (const combo of combos) {
+    for (const size of ["1536x1024", "1024x1024"]) {
+      const r = await fetch("https://ai.api.cloud.yandex.net/v1/images/generations", {
+        method: "POST",
+        headers: { Authorization: combo.auth, "OpenAI-Project": c.folder, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: `art://${c.folder}/${combo.model}`, prompt: prompt.slice(0, 1000), size }),
+      });
+      const text = await r.text();
+      if (r.ok) {
+        let j: any = {};
+        try { j = JSON.parse(text); } catch {}
+        const image = j?.data?.[0]?.b64_json;
+        if (image) {
+          working = combo;
+          console.log("Image generated with", combo.model, combo.auth.split(" ")[0], size);
+          return { image };
+        }
+        errors.push(`${combo.model}: пустой ответ`);
+        break;
+      }
+      errors.push(`${combo.model} [${combo.auth.split(" ")[0]}, ${size}] ${r.status}: ${text.slice(0, 160)}`);
+      if (r.status !== 400) break; // размер пробуем менять только при ошибке формата
+    }
   }
-  const aj = await a.json();
-  return Response.json({ caption, op: aj.id });
+  working = null;
+  console.error("Image generation failed:", errors.join(" | "));
+  return { error: errors.join(" | ").slice(0, 900) };
+}
+
+/** PUT /api/scene  { prompt } → { image } | { error } — само рисование */
+export async function PUT(req: Request) {
+  const c = config();
+  if (!c) return Response.json({ error: "not_configured" }, { status: 501 });
+  if (!(await authorize(req))) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const { prompt } = await req.json();
+  if (!prompt || typeof prompt !== "string") return Response.json({ error: "no_prompt" }, { status: 400 });
+  return Response.json(await drawImage(c, prompt));
 }
 
 export async function GET(req: Request) {

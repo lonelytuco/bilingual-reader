@@ -50,31 +50,27 @@ export async function generateScene(opts: {
   if (!r.ok) throw new SceneError("failed", `Не получилось разобрать сцену (${j.detail ?? j.error ?? r.status}).`);
   const caption: string = j.caption ?? "";
   if (caption) opts.onCaption?.(caption);
-  if (!j.op) return { caption, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${j.detail ?? j.error ?? "нет ответа"})` };
+  if (opts.signal?.cancelled) throw new SceneError("cancelled", "");
 
-  // Ждём картинку (обычно 10–30 секунд)
-  let image: string | null = null;
-  for (let i = 0; i < 45; i++) {
-    await new Promise((res) => setTimeout(res, i === 0 ? 6000 : 2500));
-    if (opts.signal?.cancelled) throw new SceneError("cancelled", "");
-    const p = await fetch(`/api/scene?op=${encodeURIComponent(j.op)}`, { headers: auth });
-    const pj = await p.json().catch(() => ({}));
-    if (pj.done) {
-      if (!pj.image) return { caption, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${pj.error ?? "пустой ответ"})` };
-      image = pj.image;
-      break;
-    }
-  }
-  if (!image) return { caption, url: null, note: "Картинка рисуется слишком долго — попробуй позже." };
+  // Рисуем (обычно 10–30 секунд)
+  const d = await fetch("/api/scene", {
+    method: "PUT",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: j.prompt ?? caption }),
+  });
+  const dj = await d.json().catch(() => ({}));
+  if (opts.signal?.cancelled) throw new SceneError("cancelled", "");
+  const image: string | null = dj.image ?? null;
+  if (!image) return { caption, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${dj.error ?? d.status})` };
 
   // Сохраняем, чтобы в следующий раз показать сразу
   const bytes = Uint8Array.from(atob(image), (ch) => ch.charCodeAt(0));
-  const blob = new Blob([bytes], { type: "image/jpeg" });
+  const blob = new Blob([bytes], { type: bytes[0] === 0x89 ? "image/png" : "image/jpeg" });
   const url = URL.createObjectURL(blob);
   try {
     const { data: u } = await supabase.auth.getUser();
-    const path = `${u.user!.id}/${opts.pairId}/${Date.now()}.jpg`;
-    const up = await supabase.storage.from("scenes").upload(path, blob, { contentType: "image/jpeg" });
+    const path = `${u.user!.id}/${opts.pairId}/${Date.now()}.${blob.type === "image/png" ? "png" : "jpg"}`;
+    const up = await supabase.storage.from("scenes").upload(path, blob, { contentType: blob.type });
     if (!up.error) {
       await supabase.from("scenes").insert({
         pair_id: opts.pairId, edition_id: opts.editionId, pos: opts.pos, caption, image_path: path,
