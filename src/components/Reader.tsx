@@ -995,8 +995,10 @@ export default function Reader({ pairId }: { pairId: string }) {
                     ? <div className="flex h-full w-full animate-pulse items-center justify-center text-sm text-muted">Рисую сцену…</div>
                     : <div className="flex h-full w-full items-center justify-center p-6 text-center text-sm text-muted">{scene.note}</div>}
               </div>
-              {scene.url && scene.picture && (
-                <p className="mt-2 text-sm italic leading-snug text-muted">{scene.picture}</p>
+              {scene.url && (
+                <p className="mt-2 text-sm italic leading-snug text-muted">
+                  {scene.picture || "Подписи нет — эта картинка нарисована до обновления. Нажми «Нарисовать заново»."}
+                </p>
               )}
               {scene.caption
                 ? <p className="serif mt-3 text-lg leading-snug">{scene.caption}</p>

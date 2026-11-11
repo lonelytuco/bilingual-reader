@@ -104,7 +104,16 @@ export async function POST(req: Request) {
   }
   const gj = await g.json();
   const out: string = gj?.result?.alternatives?.[0]?.message?.text ?? "";
-  const { caption = "", picture = "", prompt = "" } = parseJson(out);
+  const parsed = parseJson(out);
+  const caption = String(parsed.caption ?? "");
+  const prompt = String(parsed.prompt ?? "");
+  // подпись к картинке: если модель её не дала — берём 1–2 предложения из описания кадра
+  let picture = String(parsed.picture ?? "").trim();
+  if (!picture && prompt) {
+    const sents = prompt.replace(/\s+/g, " ").split(/(?<=[.!?])\s+/).filter((x) => !/^Иллюстрация к произведению/i.test(x));
+    picture = sents.slice(0, 2).join(" ").slice(0, 320);
+  }
+  if (!picture) picture = caption;
   let scene = (prompt || caption || out).replace(/\s+/g, " ").slice(0, 1400);
   // название произведения всегда в запросе художнику
   if (workTitle && !scene.includes(workTitle))
