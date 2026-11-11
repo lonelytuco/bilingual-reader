@@ -49,6 +49,9 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [editionId, setEditionId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>("Загрузка…");
   const [percent, setPercent] = useState(0);
+  const [page, setPage] = useState<{ n: number; total: number; chapterLeft: number | null } | null>(null);
+  const animRef = useRef<HTMLDivElement>(null);
+  const turning = useRef(false);
   const [cfi, setCfi] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState(110);
   const [font, setFont] = useState("literata");
@@ -158,7 +161,7 @@ export default function Reader({ pairId }: { pairId: string }) {
         doc.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
         doc.addEventListener("touchend", (e) => {
           const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
-          if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) dx < 0 ? rendition.next() : rendition.prev();
+          if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) turnRef.current(dx < 0 ? 1 : -1);
         });
         doc.addEventListener("keyup", onKey);
       });
@@ -167,6 +170,13 @@ export default function Reader({ pairId }: { pairId: string }) {
         const c = loc.start.cfi as string;
         const p = book.locations.percentageFromCfi(c) ?? 0;
         setCfi(c); setPercent(p);
+        const n = book.locations.locationFromCfi(c);
+        const d = loc.start.displayed;
+        setPage({
+          n: Math.max(1, n + 1),
+          total: (book.locations.total ?? 0) + 1,
+          chapterLeft: d && d.total ? Math.max(0, d.total - d.page) : null,
+        });
         save(c, p, ed.id);
       });
 
@@ -208,11 +218,36 @@ export default function Reader({ pairId }: { pairId: string }) {
     }
   }, [dark]);
 
+  // Плавное перелистывание: страница уезжает в сторону, новая выезжает с другой стороны
+  const turn = useCallback(async (dir: 1 | -1) => {
+    const r = rendRef.current, el = animRef.current;
+    if (!r || turning.current) return;
+    if (!el || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return dir > 0 ? r.next() : r.prev();
+    }
+    turning.current = true;
+    const shift = 28;
+    el.style.transition = "transform 140ms ease-in, opacity 140ms ease-in";
+    el.style.transform = `translateX(${dir > 0 ? -shift : shift}px)`;
+    el.style.opacity = "0";
+    await new Promise((res) => setTimeout(res, 140));
+    try { await (dir > 0 ? r.next() : r.prev()); } catch {}
+    el.style.transition = "none";
+    el.style.transform = `translateX(${dir > 0 ? shift : -shift}px)`;
+    void el.offsetWidth; // перерисовка перед обратной анимацией
+    el.style.transition = "transform 200ms ease-out, opacity 200ms ease-out";
+    el.style.transform = "translateX(0)";
+    el.style.opacity = "1";
+    setTimeout(() => { turning.current = false; }, 200);
+  }, []);
+  const turnRef = useRef(turn);
+  turnRef.current = turn;
+
   // Стрелки на клавиатуре (MacBook)
   const onKey = useCallback((e: KeyboardEvent) => {
     if ((e.target as HTMLElement)?.tagName === "INPUT") return;
-    if (e.key === "ArrowRight") rendRef.current?.next();
-    if (e.key === "ArrowLeft") rendRef.current?.prev();
+    if (e.key === "ArrowRight" || e.key === " ") turnRef.current(1);
+    if (e.key === "ArrowLeft") turnRef.current(-1);
   }, []);
   useEffect(() => {
     window.addEventListener("keyup", onKey);
@@ -323,7 +358,9 @@ export default function Reader({ pairId }: { pairId: string }) {
 
       {/* Страница книги */}
       <div className="relative flex-1 overflow-hidden">
-        <div ref={viewRef} className="absolute inset-0 mx-auto max-w-3xl px-2 py-4" />
+        <div ref={animRef} className="absolute inset-0 will-change-transform">
+          <div ref={viewRef} className="absolute inset-0 mx-auto max-w-3xl px-2 py-4" />
+        </div>
         {status && (
           <div className="absolute inset-0 flex items-center justify-center bg-paper text-muted">{status}</div>
         )}
@@ -332,12 +369,18 @@ export default function Reader({ pairId }: { pairId: string }) {
       {/* Нижняя панель */}
       <footer className="flex items-center gap-3 border-t border-line px-3 py-2 text-sm"
         style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}>
-        <button className="btn-ghost px-5" onClick={() => rendRef.current?.prev()}>‹</button>
-        <div className="flex-1 text-center text-muted">
-          {Math.round(percent * 1000) / 10}%
-          {kindleHints.length > 0 && <span className="ml-2">· {kindleHints.join(" · ")}</span>}
+        <button className="btn-ghost px-5" onClick={() => turn(-1)}>‹</button>
+        <div className="flex-1 text-center leading-tight">
+          <div className="text-ink">
+            {page ? <>Стр. {page.n} <span className="text-muted">из {page.total}</span></> : "\u00a0"}
+          </div>
+          <div className="mt-0.5 text-xs text-muted opacity-80">
+            {Math.round(percent * 100)}%
+            {page?.chapterLeft != null && <> · {page.chapterLeft === 0 ? "последняя стр. главы" : `в главе ещё ${page.chapterLeft}`}</>}
+            {kindleHints.length > 0 && <> · {kindleHints.join(" · ")}</>}
+          </div>
         </div>
-        <button className="btn-ghost px-5" onClick={() => rendRef.current?.next()}>›</button>
+        <button className="btn-ghost px-5" onClick={() => turn(1)}>›</button>
       </footer>
     </div>
   );
