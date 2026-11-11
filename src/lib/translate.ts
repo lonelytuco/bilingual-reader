@@ -28,11 +28,12 @@ function chunks(text: string, maxBytes = 480, maxChunks = 2): string[] {
   return out;
 }
 
-export async function translate(text: string, from: string, to: string): Promise<string> {
+export async function translate(text: string, from: string, to: string): Promise<{ text: string; truncated: boolean }> {
   const src = text.replace(/­/g, "").replace(/\s+/g, " ").trim();
   const f = from.toLowerCase(), t = to.toLowerCase();
-  const key = `tr:${f}:${t}:${src.slice(0, 300)}`;
-  try { const c = localStorage.getItem(key); if (c) return c; } catch {}
+  const key = `tr2:${f}:${t}:${src.slice(0, 300)}`;
+  try { const c = localStorage.getItem(key); if (c) return JSON.parse(c); } catch {}
+  let truncated = src.length > 1500;
 
   let result = "";
   // 1. Свой сервер (Claude), если настроен
@@ -48,7 +49,9 @@ export async function translate(text: string, from: string, to: string): Promise
   // 2. MyMemory
   if (!result) {
     const out: string[] = [];
-    for (const part of chunks(src)) {
+    const parts = chunks(src);
+    truncated = parts.join(" ").length < src.length * 0.9;
+    for (const part of parts) {
       const u = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(part)}&langpair=${f}|${t}`;
       const r = await fetch(u);
       const j = await r.json();
@@ -60,6 +63,7 @@ export async function translate(text: string, from: string, to: string): Promise
     result = out.join(" ");
   }
   if (!result) throw new Error("Не удалось перевести фрагмент.");
-  try { localStorage.setItem(key, result); } catch {}
-  return result;
+  const res = { text: result, truncated };
+  try { localStorage.setItem(key, JSON.stringify(res)); } catch {}
+  return res;
 }

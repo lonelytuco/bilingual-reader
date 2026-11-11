@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabase";
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
-import { sentencesOf, findBest, pointAt, norm, type Sent } from "@/lib/align";
+import { sentencesOf, locate, mapPos, countSentences, pointAt, norm, type Sent } from "@/lib/align";
 import { translate } from "@/lib/translate";
 
 type Mark = { cfi: string; text: string };
@@ -122,6 +122,8 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [remote, setRemote] = useState<Progress | null>(null);
   const [sel, setSel] = useState<(Mark & { sec: number }) | null>(null);
   const [hl, setHl] = useState<Mark | null>(null);
+  const [alts, setAlts] = useState<Mark[]>([]);   // запасные варианты найденного места
+  const [altIdx, setAltIdx] = useState(0);
   const [xBusy, setXBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -508,6 +510,7 @@ export default function Reader({ pairId }: { pairId: string }) {
 
   function switchLang(id: string) {
     if (id === editionId) return;
+    setAlts([]);
     jumpRef.current = { percent };
     setEditionId(id);
   }
@@ -536,7 +539,19 @@ export default function Reader({ pairId }: { pairId: string }) {
     } catch {}
   }
 
-  /** Снять подсветку и выделение */
+  /** Снять подсветку и выделение (и забыть запасные варианты) */
+  function clearAll() {
+    clearHighlight();
+    setAlts([]);
+  }
+
+  function showAlt(k: number) {
+    const m = alts[k];
+    if (!m) return;
+    setAltIdx(k);
+    rendRef.current?.display(m.cfi).then(() => addHighlight(m));
+  }
+
   function clearHighlight() {
     const r = rendRef.current;
     if (hlRef.current && r) { try { r.annotations.remove(hlRef.current, "highlight"); } catch {} }
@@ -554,45 +569,62 @@ export default function Reader({ pairId }: { pairId: string }) {
       setXBusy("Перевожу…");
       const trP = translate(text, edition.lang, target.lang).catch((e: Error) => {
         setNotice(e.message + " Открываю примерно то же место.");
-        return "";
+        return { text: "", truncated: false };
       });
-      const [sIdx, tIdx, translated] = await Promise.all([textIndex(edition), textIndex(target), trP]);
+      const [sIdx, tIdx, tr] = await Promise.all([textIndex(edition), textIndex(target), trP]);
 
-      // Где выделение в исходной книге (по знакам): ищем предложение, с которого оно начинается
+      // Где выделение в исходной книге: ищем предложение, с которого оно начинается
       setXBusy("Ищу это место…");
       let srcPos = percent;
-      const needle = norm(text).slice(0, 24);
-      const cands = sIdx.sents.filter((s) => (source.sec < 0 || s.sec === source.sec) && norm(s.text).includes(needle));
-      if (cands.length) {
-        cands.sort((a, b) => Math.abs(a.pos - percent) - Math.abs(b.pos - percent));
-        srcPos = cands[0].pos;
-      }
-
-      let found: ReturnType<typeof findBest> = null;
-      let pool: Sent[] = [];
-      if (translated) {
-        const targetLen = text.length * (tIdx.total / sIdx.total);
-        for (const win of [0.05, 0.15, 0.4]) {
-          const c = tIdx.sents.filter((s) => Math.abs(s.pos - srcPos) <= win);
-          const res = findBest(c, translated, srcPos, targetLen);
-          if (res && (!found || res.sim > found.sim)) { found = res; pool = c; }
-          if (found && found.sim >= 0.25) break;
+      const nt = norm(text);
+      for (const needle of [nt.slice(0, 24), nt.slice(-24), nt.slice(Math.floor(nt.length / 2), Math.floor(nt.length / 2) + 24)]) {
+        const cands = sIdx.sents.filter((s) => (source.sec < 0 || s.sec === source.sec) && norm(s.text).includes(needle));
+        if (cands.length) {
+          cands.sort((a, b) => Math.abs(a.pos - percent) - Math.abs(b.pos - percent));
+          srcPos = cands[0].pos;
+          break;
         }
       }
 
-      clearHighlight();
-      if (found && found.sim >= 0.08) {
-        const s = pool[found.start], e = pool[found.end];
+      // Опорные точки от прошлых уверенных переходов: насколько версии сдвинуты друг относительно друга
+      const akey = `anc:${edition.id}>${target.id}`, bkey = `anc:${target.id}>${edition.id}`;
+      const loadA = (k: string): [number, number][] => { try { return JSON.parse(localStorage.getItem(k) ?? "[]"); } catch { return []; } };
+      const expected = mapPos(srcPos, loadA(akey));
+
+      const hits = tr.text
+        ? locate(tIdx.sents, tr.text, expected, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text))
+        : [];
+
+      clearAll();
+      if (hits.length && hits[0].sim >= 0.12) {
         const tb = await getBook(target);
-        const range = s.el.ownerDocument.createRange();
-        range.setStart(...pointAt(s.el, s.start));
-        range.setEnd(...pointAt(e.el, e.end));
-        const mark = { cfi: tb.spine.get(s.sec).cfiFromRange(range), text: range.toString() };
-        jumpRef.current = { cfi: mark.cfi, highlight: mark };
-        if (found.sim < 0.2) setNotice("Место найдено приблизительно — переводы заметно отличаются.");
+        const marks: Mark[] = hits.map((h) => {
+          const s = tIdx.sents[h.start], e = tIdx.sents[h.end];
+          const range = s.el.ownerDocument.createRange();
+          range.setStart(...pointAt(s.el, s.start));
+          range.setEnd(...pointAt(e.el, e.end));
+          return { cfi: tb.spine.get(s.sec).cfiFromRange(range), text: range.toString() };
+        });
+        jumpRef.current = { cfi: marks[0].cfi, highlight: marks[0] };
+        setAlts(marks);
+        setAltIdx(0);
+        const sure = hits[0].sim >= 0.4 && (hits.length < 2 || hits[0].score - hits[1].score >= 0.08);
+        if (sure) {
+          // запоминаем соответствие позиций в обе стороны
+          const tPos = tIdx.sents[hits[0].start].pos;
+          const add = (k: string, a: number, b: number) => {
+            const list = loadA(k).filter(([x]) => Math.abs(x - a) > 0.01);
+            list.push([a, b]);
+            try { localStorage.setItem(k, JSON.stringify(list.slice(-40))); } catch {}
+          };
+          add(akey, srcPos, tPos);
+          add(bkey, tPos, srcPos);
+        } else if (hits.length > 1) {
+          setNotice("Не уверен на 100% — если подсвечено не то, переключи вариант стрелками ‹ › сверху.");
+        }
       } else {
-        jumpRef.current = { percent: srcPos };
-        if (translated) setNotice("Точно не нашёл — открыл примерно то же место.");
+        jumpRef.current = { percent: mapPos(srcPos, loadA(akey)) };
+        if (tr.text) setNotice("Точно не нашёл — открыл примерно то же место.");
       }
       setEditionId(target.id);
     } catch (e) {
@@ -638,8 +670,16 @@ export default function Reader({ pairId }: { pairId: string }) {
               Найти в {e.lang} →
             </button>
           ))}
+          {!xBusy && !sel && hl && alts.length > 1 && (
+            <div className="flex shrink-0 items-center gap-1">
+              <span className="hidden text-muted sm:inline">Не то место?</span>
+              <button className="btn-ghost px-2 py-1" onClick={() => showAlt((altIdx + alts.length - 1) % alts.length)}>‹</button>
+              <span className="w-12 text-center text-muted">{altIdx + 1} из {alts.length}</span>
+              <button className="btn-ghost px-2 py-1" onClick={() => showAlt((altIdx + 1) % alts.length)}>›</button>
+            </div>
+          )}
           {!xBusy && (
-            <button className="btn-ghost shrink-0 py-1" onClick={clearHighlight} title="Снять выделение">
+            <button className="btn-ghost shrink-0 py-1" onClick={clearAll} title="Снять выделение">
               ✕ Снять
             </button>
           )}

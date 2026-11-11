@@ -139,3 +139,103 @@ export function pointAt(el: Element, off: number): [Node, number] {
   }
   return [last ?? el, last ? (last.textContent ?? "").length : 0];
 }
+
+/** Вес слов: редкие (имена, конкретные предметы) важнее частых */
+export function buildIdf(sents: Sent[]): Map<string, number> {
+  const df = new Map<string, number>();
+  for (const s of sents) for (const t of new Set(s.tok)) df.set(t, (df.get(t) ?? 0) + 1);
+  const N = sents.length || 1;
+  const idf = new Map<string, number>();
+  for (const [t, d] of df) idf.set(t, Math.log(1 + N / d));
+  return idf;
+}
+
+function weighted(a: string[], b: string[], idf: Map<string, number>, dflt: number): number {
+  if (!a.length || !b.length) return 0;
+  const w = (t: string) => idf.get(t) ?? dflt;
+  const m = new Map<string, number>();
+  let wa = 0, wb = 0, common = 0;
+  for (const t of a) { m.set(t, (m.get(t) ?? 0) + 1); wa += w(t); }
+  for (const t of b) {
+    wb += w(t);
+    const k = m.get(t);
+    if (k) { common += w(t); m.set(t, k - 1); }
+  }
+  return (2 * common) / (wa + wb);
+}
+
+export type Hit = { start: number; end: number; score: number; sim: number };
+
+/**
+ * Ищет по ВСЕЙ книге окна из 1…N подряд идущих предложений, похожие на перевод.
+ * Близость к ожидаемому месту — мягкий бонус, а не жёсткий фильтр (версии бывают сдвинуты).
+ * Возвращает до 3 лучших непересекающихся вариантов.
+ */
+export function locate(
+  sents: Sent[], translated: string, expectedPos: number, targetLen: number, truncated: boolean, srcSentences = 1,
+): Hit[] {
+  const q = tokens(translated);
+  if (!q.length || !sents.length) return [];
+  const idf = buildIdf(sents);
+  const dflt = Math.log(1 + sents.length); // слово, которого нет в книге, — «редкое»
+  const qLen = Math.max(20, translated.length);
+  const maxLen = Math.max(qLen * 1.5, 60);
+  const hits: Hit[] = [];
+  for (let i = 0; i < sents.length; i++) {
+    const d = Math.abs(sents[i].pos - expectedPos);
+    const near = 1 / (1 + (d / 0.08) ** 2);
+    let len = 0;
+    let tok: string[] = [];
+    let best: Hit | null = null;
+    for (let j = i; j < sents.length && j < i + 15; j++) {
+      if (j > i && sents[j].sec !== sents[i].sec) break;
+      len += sents[j].text.length + 1;
+      tok = tok.concat(sents[j].tok);
+      const sim = weighted(q, tok, idf, dflt);
+      // смысл важнее места; число предложений обычно совпадает с выделением
+      const shape = Math.pow(0.85, Math.abs(j - i + 1 - srcSentences));
+      const score = sim * (0.55 + 0.45 * near) * shape;
+      if (!best || score > best.score) best = { start: i, end: j, score, sim };
+      if (len > maxLen) break;
+    }
+    if (best) hits.push(best);
+  }
+  hits.sort((a, b) => b.score - a.score);
+  const out: Hit[] = [];
+  for (const h of hits) {
+    if (out.some((o) => !(h.end < o.start || h.start > o.end))) continue;
+    out.push(h);
+    if (out.length >= 3) break;
+  }
+  // перевели только начало длинного выделения — дотягиваем конец до ожидаемой длины
+  if (truncated) {
+    for (const h of out) {
+      let len = 0;
+      for (let k = h.start; k <= h.end; k++) len += sents[k].text.length + 1;
+      while (h.end + 1 < sents.length && sents[h.end + 1].sec === sents[h.start].sec) {
+        const next = len + sents[h.end + 1].text.length + 1;
+        if (Math.abs(next - targetLen) >= Math.abs(len - targetLen)) break;
+        len = next; h.end++;
+      }
+    }
+  }
+  return out;
+}
+
+/** Опорные точки (уже найденные соответствия позиций) → ожидаемая позиция в другой версии */
+export function mapPos(pos: number, anchors: [number, number][]): number {
+  if (!anchors.length) return pos;
+  const a = [...anchors].sort((x, y) => x[0] - y[0]);
+  if (pos <= a[0][0]) return Math.max(0, pos + (a[0][1] - a[0][0]));
+  const last = a[a.length - 1];
+  if (pos >= last[0]) return Math.min(1, pos + (last[1] - last[0]));
+  for (let k = 0; k + 1 < a.length; k++) {
+    const [s0, t0] = a[k], [s1, t1] = a[k + 1];
+    if (pos >= s0 && pos <= s1) return s1 === s0 ? t0 : t0 + ((pos - s0) / (s1 - s0)) * (t1 - t0);
+  }
+  return pos;
+}
+
+export function countSentences(text: string) {
+  return Math.max(1, splitSentences(text).length);
+}
