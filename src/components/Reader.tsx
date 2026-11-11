@@ -128,6 +128,11 @@ export default function Reader({ pairId }: { pairId: string }) {
 
   const [xBusy, setXBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Перевод выделенного фрагмента — как в другой версии этой книги
+  type Preview = { target: Edition; status: "loading" | "done"; source: string; match?: Match };
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [previewLang, setPreviewLang] = useState<string | null>(null);
+  const prevTok = useRef(0);
   // Kindle
   const modelsRef = useRef(new Map<string, Promise<KModel>>());
   const [kHint, setKHint] = useState<string | null>(null);
@@ -599,6 +604,29 @@ export default function Reader({ pairId }: { pairId: string }) {
 
   // ——— Выделение и переход в другую версию ———
 
+  // Выделил текст → через мгновение показываем, как этот фрагмент переведён в другой версии книги.
+  // Панель не исчезает сама, когда выделение сбрасывается (на iPad это бывает при нажатии на кнопку).
+  useEffect(() => {
+    if (!sel || !edition) return;
+    const others = editions.filter((e) => e.id !== edition.id);
+    if (!others.length) return;
+    const target = others.find((e) => e.id === previewLang) ?? others[0];
+    const tok = ++prevTok.current;
+    const source = { text: sel.text, sec: sel.sec };
+    const t = setTimeout(async () => {
+      setPreview({ target, status: "loading", source: source.text });
+      try {
+        const match = await computeMatch(source, edition, target);
+        if (tok === prevTok.current) setPreview({ target, status: "done", source: source.text, match });
+      } catch (e) {
+        if (tok === prevTok.current)
+          setPreview({ target, status: "done", source: source.text, match: { mark: null, srcPos: percent, mt: "", error: (e as Error).message } });
+      }
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.cfi, sel?.text, previewLang]);
+
   function addHighlight(m: Mark) {
     const r = rendRef.current;
     if (!r) return;
@@ -625,52 +653,62 @@ export default function Reader({ pairId }: { pairId: string }) {
     setSel(null);
   }
 
+  type Match = { mark: Mark | null; srcPos: number; mt: string; error?: string };
+
+  /** Найти фрагмент во второй версии книги: текст переводчика книги + место для перехода */
+  async function computeMatch(source: { text: string; sec: number }, from: Edition, target: Edition): Promise<Match> {
+    const { text } = source;
+    let error: string | undefined;
+    const trP = translate(text, from.lang, target.lang).catch((e: Error) => {
+      error = e.message;
+      return { text: "", truncated: false };
+    });
+    const [sIdx, tIdx, tr] = await Promise.all([textIndex(from), textIndex(target), trP]);
+
+    // Где выделение в исходной книге: ищем предложение, с которого оно начинается
+    let srcPos = percent;
+    const nt = norm(text);
+    for (const needle of [nt.slice(0, 24), nt.slice(-24), nt.slice(Math.floor(nt.length / 2), Math.floor(nt.length / 2) + 24)]) {
+      const cands = sIdx.sents.filter((s) => (source.sec < 0 || s.sec === source.sec) && norm(s.text).includes(needle));
+      if (cands.length) {
+        cands.sort((a, b) => Math.abs(a.pos - percent) - Math.abs(b.pos - percent));
+        srcPos = cands[0].pos;
+        break;
+      }
+    }
+
+    // Самое близкое по смыслу место в пределах ±10% книги от той же позиции
+    const pool = tIdx.sents.filter((s) => Math.abs(s.pos - srcPos) <= 0.1);
+    const hits = tr.text
+      ? locate(pool, tr.text, srcPos, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text))
+      : [];
+    if (!hits.length || hits[0].sim < 0.1) return { mark: null, srcPos, mt: tr.text, error };
+
+    const tb = await getBook(target);
+    const h = hits[0];
+    const s = pool[h.start], e = pool[h.end];
+    const range = s.el.ownerDocument.createRange();
+    range.setStart(...pointAt(s.el, s.start));
+    range.setEnd(...pointAt(e.el, e.end));
+    return { mark: { cfi: tb.spine.get(s.sec).cfiFromRange(range), text: range.toString().replace(/\s+/g, " ").trim() }, srcPos, mt: tr.text };
+  }
+
+  /** Перейти во вторую версию на найденное место (с подсветкой) */
+  function openMatch(target: Edition, m: Match) {
+    clearAll();
+    setPreview(null);
+    if (m.mark) jumpRef.current = { cfi: m.mark.cfi, highlight: m.mark };
+    else jumpRef.current = { percent: m.srcPos };
+    setEditionId(target.id);
+  }
+
+  /** Из подсвеченного фрагмента — обратно в другую версию */
   async function findInOther(target: Edition) {
     const source = sel ?? (hl ? { ...hl, sec: -1 } : null);
     if (!source || !edition) return;
-    const { text } = source;
     try {
-      setXBusy("Перевожу…");
-      const trP = translate(text, edition.lang, target.lang).catch((e: Error) => {
-        setNotice(e.message + " Открываю примерно то же место.");
-        return { text: "", truncated: false };
-      });
-      const [sIdx, tIdx, tr] = await Promise.all([textIndex(edition), textIndex(target), trP]);
-
-      // Где выделение в исходной книге: ищем предложение, с которого оно начинается
       setXBusy("Ищу это место…");
-      let srcPos = percent;
-      const nt = norm(text);
-      for (const needle of [nt.slice(0, 24), nt.slice(-24), nt.slice(Math.floor(nt.length / 2), Math.floor(nt.length / 2) + 24)]) {
-        const cands = sIdx.sents.filter((s) => (source.sec < 0 || s.sec === source.sec) && norm(s.text).includes(needle));
-        if (cands.length) {
-          cands.sort((a, b) => Math.abs(a.pos - percent) - Math.abs(b.pos - percent));
-          srcPos = cands[0].pos;
-          break;
-        }
-      }
-
-      // Ищем самое близкое по смыслу место в пределах ±10% книги от той же позиции
-      const pool = tIdx.sents.filter((s) => Math.abs(s.pos - srcPos) <= 0.1);
-      const hits = tr.text
-        ? locate(pool, tr.text, srcPos, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text))
-        : [];
-
-      clearAll();
-      if (hits.length && hits[0].sim >= 0.1) {
-        const tb = await getBook(target);
-        const h = hits[0];
-        const s = pool[h.start], e = pool[h.end];
-        const range = s.el.ownerDocument.createRange();
-        range.setStart(...pointAt(s.el, s.start));
-        range.setEnd(...pointAt(e.el, e.end));
-        const mark = { cfi: tb.spine.get(s.sec).cfiFromRange(range), text: range.toString() };
-        jumpRef.current = { cfi: mark.cfi, highlight: mark };
-      } else {
-        jumpRef.current = { percent: srcPos };
-        if (tr.text) setNotice("Похожего места рядом не нашлось — открыл ту же позицию в книге.");
-      }
-      setEditionId(target.id);
+      openMatch(target, await computeMatch(source, edition, target));
     } catch (e) {
       setNotice("Ошибка: " + (e as Error).message);
     } finally {
@@ -679,7 +717,8 @@ export default function Reader({ pairId }: { pairId: string }) {
   }
 
 
-  const marked = sel ?? hl;
+
+  const marked = preview || sel ? null : hl;
 
   return (
     <div className="flex h-dvh flex-col" style={{ paddingTop: "env(safe-area-inset-top)" }}>
@@ -701,6 +740,45 @@ export default function Reader({ pairId }: { pairId: string }) {
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "kindle" ? null : "kindle")}>Kindle</button>
       </header>
 
+      {preview && (
+        <div className="border-b border-line bg-card/70 px-4 py-3 text-sm">
+          <div className="flex items-center gap-2 text-muted">
+            <span>Перевод в книге</span>
+            {editions.filter((e) => e.id !== editionId).length > 1 ? (
+              <div className="flex overflow-hidden rounded-md border border-line">
+                {editions.filter((e) => e.id !== editionId).map((e) => (
+                  <button key={e.id} onClick={() => setPreviewLang(e.id)}
+                    className={`px-2 py-0.5 ${e.id === preview.target.id ? "bg-ink text-paper" : ""}`}>{e.lang}</button>
+                ))}
+              </div>
+            ) : <span>· {preview.target.lang}</span>}
+            <span className="flex-1" />
+            <button className="px-1 hover:text-ink" onClick={() => { prevTok.current++; setPreview(null); }} title="Закрыть">✕</button>
+          </div>
+          {preview.status === "loading" && (
+            <div className="mt-2 animate-pulse text-muted">Ищу этот фрагмент в версии {preview.target.lang}…</div>
+          )}
+          {preview.status === "done" && preview.match?.mark && (
+            <div className="serif mt-2 max-h-48 overflow-auto text-base leading-relaxed text-ink">
+              {preview.match.mark.text}
+            </div>
+          )}
+          {preview.status === "done" && !preview.match?.mark && (
+            <div className="mt-2">
+              <div className="text-xs text-muted">
+                {preview.match?.error ? preview.match.error + " " : ""}
+                {preview.match?.mt ? "Точного места в книге рядом не нашлось. Машинный перевод:" : "Не получилось найти перевод."}
+              </div>
+              {preview.match?.mt && <div className="serif mt-1 text-base leading-relaxed text-ink">{preview.match.mt}</div>}
+            </div>
+          )}
+          {preview.status === "done" && preview.match && (
+            <button className="btn-primary mt-3 py-1" onClick={() => openMatch(preview.target, preview.match!)}>
+              Открыть в {preview.target.lang} →
+            </button>
+          )}
+        </div>
+      )}
       {(marked || xBusy) && (
         <div className="flex items-center gap-2 border-b border-line bg-card/60 px-4 py-2 text-sm">
           <span className="serif min-w-0 flex-1 truncate text-muted">
