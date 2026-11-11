@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "epubjs": "^0.3.93",
     "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0"
