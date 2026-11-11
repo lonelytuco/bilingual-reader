@@ -138,7 +138,7 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [previewLang, setPreviewLang] = useState<string | null>(null);
   const prevTok = useRef(0);
   // Картинка «где мы остановились»
-  type SceneView = { status: "loading" | "ready" | "error"; caption?: string; url?: string | null; note?: string };
+  type SceneView = { status: "loading" | "ready" | "error"; caption?: string; picture?: string; url?: string | null; note?: string };
   const [scene, setScene] = useState<SceneView | null>(null);
   const sceneTok = useRef({ cancelled: false });
   const sessionGapRef = useRef<number>(0); // сколько прошло с прошлого чтения на момент открытия
@@ -995,6 +995,9 @@ export default function Reader({ pairId }: { pairId: string }) {
                     ? <div className="flex h-full w-full animate-pulse items-center justify-center text-sm text-muted">Рисую сцену…</div>
                     : <div className="flex h-full w-full items-center justify-center p-6 text-center text-sm text-muted">{scene.note}</div>}
               </div>
+              {scene.url && scene.picture && (
+                <p className="mt-2 text-sm italic leading-snug text-muted">{scene.picture}</p>
+              )}
               {scene.caption
                 ? <p className="serif mt-3 text-lg leading-snug">{scene.caption}</p>
                 : scene.status === "loading" && <p className="mt-3 animate-pulse text-muted">Вспоминаю, что происходит…</p>}

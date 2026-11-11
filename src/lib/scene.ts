@@ -4,7 +4,12 @@
  */
 import { supabase } from "@/lib/supabase";
 
-export type Scene = { caption: string; url: string | null; note?: string };
+export type Scene = { caption: string; picture?: string; url: string | null; note?: string };
+
+// подпись к картинке хранится в том же поле, что и пересказ (через пустую строку) — без изменений в базе
+const SEP = "\n\n🖼 ";
+const pack = (caption: string, picture?: string) => (picture ? caption + SEP + picture : caption);
+const unpack = (s: string) => { const i = s.indexOf(SEP); return i < 0 ? { caption: s } : { caption: s.slice(0, i), picture: s.slice(i + SEP.length) }; };
 
 const NEAR = 0.008; // ±0.8% книги — считаем «тем же местом»
 
@@ -23,7 +28,7 @@ export async function findCachedScene(pairId: string, editionId: string, pos: nu
   const best = near.find((s: any) => s.edition_id === editionId) ?? near[0];
   if (!best) return null;
   const { data: signed } = await supabase.storage.from("scenes").createSignedUrl(best.image_path, 60 * 60);
-  return signed?.signedUrl ? { caption: best.caption ?? "", url: signed.signedUrl } : null;
+  return signed?.signedUrl ? { ...unpack(best.caption ?? ""), url: signed.signedUrl } : null;
 }
 
 export class SceneError extends Error {
@@ -50,6 +55,7 @@ export async function generateScene(opts: {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new SceneError("failed", `Не получилось разобрать сцену (${j.detail ?? j.error ?? r.status}).`);
   const caption: string = j.caption ?? "";
+  const picture: string = j.picture ?? "";
   if (caption) opts.onCaption?.(caption);
   if (opts.signal?.cancelled) throw new SceneError("cancelled", "");
 
@@ -62,7 +68,7 @@ export async function generateScene(opts: {
   const dj = await d.json().catch(() => ({}));
   if (opts.signal?.cancelled) throw new SceneError("cancelled", "");
   const image: string | null = dj.image ?? null;
-  if (!image) return { caption, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${dj.error ?? d.status})` };
+  if (!image) return { caption, picture, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${dj.error ?? d.status})` };
 
   // Сохраняем, чтобы в следующий раз показать сразу
   const bytes = Uint8Array.from(atob(image), (ch) => ch.charCodeAt(0));
@@ -74,9 +80,9 @@ export async function generateScene(opts: {
     const up = await supabase.storage.from("scenes").upload(path, blob, { contentType: blob.type });
     if (!up.error) {
       await supabase.from("scenes").insert({
-        pair_id: opts.pairId, edition_id: opts.editionId, pos: opts.pos, caption, image_path: path,
+        pair_id: opts.pairId, edition_id: opts.editionId, pos: opts.pos, caption: pack(caption, picture), image_path: path,
       });
     }
   } catch { /* не сохранилось — не страшно, покажем всё равно */ }
-  return { caption, url };
+  return { caption, picture, url };
 }

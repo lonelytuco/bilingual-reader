@@ -28,8 +28,10 @@ const SYSTEM =
   "в тексте «СЕЙЧАС НА ЭКРАНЕ», — с теми героями и в той обстановке, которые там описаны. " +
   "Если ты знаешь это произведение, используй своё знание о нём: эпоху, страну, место действия, внешность и возраст героев, " +
   "их одежду и быт, — но сам момент бери строго из текста на экране, ничего не придумывай сверх него. " +
-  'Ответь строго JSON без пояснений: {"caption": "...", "prompt": "..."}. ' +
+  'Ответь строго JSON без пояснений: {"caption": "...", "picture": "...", "prompt": "..."}. ' +
   "caption — по-русски, 1–2 коротких предложения: что сейчас происходит, с именами героев, чтобы читатель быстро вспомнил. " +
+  "picture — по-русски, 1–3 предложения: подпись к иллюстрации — что именно на ней изображено (кто, где, что делает, ключевые предметы), " +
+  "так, чтобы читатель, глядя на картинку, сразу понял, что он видит. Подпись должна точно соответствовать prompt. " +
   "prompt — подробное описание кадра для художника, по-русски, 600–1000 символов. Начни с фразы " +
   "«Иллюстрация к произведению «<название>» (<автор>), <эпоха и место действия>.» Затем конкретно: " +
   "кто в кадре (имя героя и его внешность: возраст, телосложение, причёска, одежда), что каждый делает и какое у него выражение лица; " +
@@ -60,7 +62,7 @@ const headers = (c: { key: string; folder: string }) => ({
   "Content-Type": "application/json",
 });
 
-function parseJson(s: string): { caption?: string; prompt?: string } {
+function parseJson(s: string): { caption?: string; picture?: string; prompt?: string } {
   const m = s.match(/\{[\s\S]*\}/);
   try { return JSON.parse(m ? m[0] : s); } catch { return {}; }
 }
@@ -102,13 +104,13 @@ export async function POST(req: Request) {
   }
   const gj = await g.json();
   const out: string = gj?.result?.alternatives?.[0]?.message?.text ?? "";
-  const { caption = "", prompt = "" } = parseJson(out);
+  const { caption = "", picture = "", prompt = "" } = parseJson(out);
   let scene = (prompt || caption || out).replace(/\s+/g, " ").slice(0, 1400);
   // название произведения всегда в запросе художнику
   if (workTitle && !scene.includes(workTitle))
     scene = `Иллюстрация к произведению «${workTitle}»${workAuthor ? ` (${workAuthor})` : ""}. ${scene}`;
 
-  return Response.json({ caption, prompt: `${scene} ${STYLE}` });
+  return Response.json({ caption, picture, prompt: `${scene} ${STYLE}` });
 }
 
 /**
