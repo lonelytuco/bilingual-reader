@@ -53,37 +53,38 @@ export function splitSentences(t: string): { start: number; end: number }[] {
 }
 
 export type Sent = {
-  sec: number;     // номер главы (секции) в книге
+  sec: number;     // номер файла (секции) внутри EPUB
   el: Element;     // абзац
   start: number;   // позиция начала в тексте абзаца
   end: number;
   text: string;
   tok: string[];
-  pos: number;     // примерная позиция в книге, 0…1
+  off: number;     // сколько знаков книги до этого предложения
+  pos: number;     // позиция в книге, 0…1 (считается по знакам)
 };
 
 const BLOCK = "p, li, h1, h2, h3, h4, h5, h6, blockquote, div, dd, dt, td, pre";
 
-/** Все предложения секции, по абзацам, в порядке чтения */
-export function sentencesOf(doc: Document, sec: number, posFrom: number, posTo: number): Sent[] {
+/** Все предложения одного файла книги, по абзацам, в порядке чтения. Не зависит от разметки глав. */
+export function sentencesOf(doc: Document, sec: number): { sents: Sent[]; len: number } {
   const all = Array.from(doc.querySelectorAll(BLOCK));
   // берём только «листовые» блоки, чтобы не дублировать текст вложенных
   const leaves = all.filter((el) => !el.querySelector(BLOCK) && (el.textContent ?? "").trim().length > 0);
-  const total = leaves.reduce((s, el) => s + (el.textContent ?? "").length, 0) || 1;
-  const out: Sent[] = [];
+  const sents: Sent[] = [];
   let acc = 0;
   for (const el of leaves) {
     const text = el.textContent ?? "";
     for (const s of splitSentences(text)) {
       const t = text.slice(s.start, s.end);
-      out.push({
-        sec, el, start: s.start, end: s.end, text: t, tok: tokens(t),
-        pos: posFrom + (posTo - posFrom) * ((acc + s.start) / total),
-      });
+      sents.push({ sec, el, start: s.start, end: s.end, text: t, tok: tokens(t), off: acc + s.start, pos: 0 });
     }
     acc += text.length;
   }
-  return out;
+  return { sents, len: acc };
+}
+
+export function norm(t: string) {
+  return t.replace(/\u00ad/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 /**
