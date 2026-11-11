@@ -47,10 +47,10 @@ export async function generateScene(opts: {
   if (r.status === 501) throw new SceneError("not_configured", "Картинки ещё не подключены: нужен ключ Яндекса в настройках Vercel.");
   if (r.status === 401) throw new SceneError("unauthorized", "Нет доступа к рисованию (проверь ALLOWED_EMAILS в Vercel).");
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new SceneError("failed", "Не получилось разобрать сцену. Попробуй ещё раз позже.");
+  if (!r.ok) throw new SceneError("failed", `Не получилось разобрать сцену (${j.detail ?? j.error ?? r.status}).`);
   const caption: string = j.caption ?? "";
   if (caption) opts.onCaption?.(caption);
-  if (!j.op) return { caption, url: null, note: "Картинку нарисовать не получилось — только пересказ." };
+  if (!j.op) return { caption, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${j.detail ?? j.error ?? "нет ответа"})` };
 
   // Ждём картинку (обычно 10–30 секунд)
   let image: string | null = null;
@@ -60,7 +60,7 @@ export async function generateScene(opts: {
     const p = await fetch(`/api/scene?op=${encodeURIComponent(j.op)}`, { headers: auth });
     const pj = await p.json().catch(() => ({}));
     if (pj.done) {
-      if (!pj.image) return { caption, url: null, note: "Картинку нарисовать не получилось — только пересказ." };
+      if (!pj.image) return { caption, url: null, note: `Картинку нарисовать не получилось — только пересказ. (${pj.error ?? "пустой ответ"})` };
       image = pj.image;
       break;
     }

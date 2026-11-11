@@ -76,7 +76,11 @@ export async function POST(req: Request) {
       ],
     }),
   });
-  if (!g.ok) return Response.json({ error: "gpt_failed", detail: (await g.text()).slice(0, 500) }, { status: 502 });
+  if (!g.ok) {
+    const detail = (await g.text()).slice(0, 500);
+    console.error("YandexGPT failed", g.status, detail);
+    return Response.json({ error: "gpt_failed", detail: `${g.status}: ${detail}` }, { status: 502 });
+  }
   const gj = await g.json();
   const out: string = gj?.result?.alternatives?.[0]?.message?.text ?? "";
   const { caption = "", prompt = "" } = parseJson(out);
@@ -92,7 +96,11 @@ export async function POST(req: Request) {
       messages: [{ weight: "1", text: `${scene} ${STYLE}`.slice(0, 500) }],
     }),
   });
-  if (!a.ok) return Response.json({ caption, error: "art_failed", detail: (await a.text()).slice(0, 500) }, { status: 200 });
+  if (!a.ok) {
+    const detail = (await a.text()).slice(0, 500);
+    console.error("YandexART start failed", a.status, detail);
+    return Response.json({ caption, error: "art_failed", detail: `${a.status}: ${detail}` }, { status: 200 });
+  }
   const aj = await a.json();
   return Response.json({ caption, op: aj.id });
 }
@@ -104,9 +112,16 @@ export async function GET(req: Request) {
   const op = new URL(req.url).searchParams.get("op");
   if (!op || !/^[\w-]+$/.test(op)) return Response.json({ error: "bad_op" }, { status: 400 });
   const r = await fetch(`${API}/operations/${op}`, { headers: headers(c) });
-  if (!r.ok) return Response.json({ error: "poll_failed" }, { status: 502 });
+  if (!r.ok) {
+    const detail = (await r.text()).slice(0, 500);
+    console.error("YandexART poll failed", r.status, detail);
+    return Response.json({ done: true, error: `${r.status}: ${detail}` });
+  }
   const j = await r.json();
-  if (j.error) return Response.json({ done: true, error: j.error.message ?? "generation_failed" });
+  if (j.error) {
+    console.error("YandexART generation error", JSON.stringify(j.error));
+    return Response.json({ done: true, error: j.error.message ?? "generation_failed" });
+  }
   if (!j.done) return Response.json({ done: false });
   return Response.json({ done: true, image: j.response?.image ?? null });
 }
