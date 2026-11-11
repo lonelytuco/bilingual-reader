@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+// шрифты для кнопок выбора шрифта
+import "../../public/fonts/fonts.css";
 
 export const metadata: Metadata = {
   title: "Две книги",

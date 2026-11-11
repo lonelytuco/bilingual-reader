@@ -1,0 +1,256 @@
+/* literata-latin-400-normal */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./literata-latin-400-normal.woff2) format('woff2');
+}
+/* literata-latin-400-italic */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./literata-latin-400-italic.woff2) format('woff2');
+}
+/* literata-latin-700-normal */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./literata-latin-700-normal.woff2) format('woff2');
+}
+/* literata-latin-700-italic */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./literata-latin-700-italic.woff2) format('woff2');
+}
+/* literata-cyrillic-400-normal */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./literata-cyrillic-400-normal.woff2) format('woff2');
+}
+/* literata-cyrillic-400-italic */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./literata-cyrillic-400-italic.woff2) format('woff2');
+}
+/* literata-cyrillic-700-normal */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./literata-cyrillic-700-normal.woff2) format('woff2');
+}
+/* literata-cyrillic-700-italic */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./literata-cyrillic-700-italic.woff2) format('woff2');
+}
+/* pt-serif-latin-400-normal */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./pt-serif-latin-400-normal.woff2) format('woff2');
+}
+/* pt-serif-latin-400-italic */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./pt-serif-latin-400-italic.woff2) format('woff2');
+}
+/* pt-serif-latin-700-normal */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./pt-serif-latin-700-normal.woff2) format('woff2');
+}
+/* pt-serif-latin-700-italic */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./pt-serif-latin-700-italic.woff2) format('woff2');
+}
+/* pt-serif-cyrillic-400-normal */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./pt-serif-cyrillic-400-normal.woff2) format('woff2');
+}
+/* pt-serif-cyrillic-400-italic */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./pt-serif-cyrillic-400-italic.woff2) format('woff2');
+}
+/* pt-serif-cyrillic-700-normal */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./pt-serif-cyrillic-700-normal.woff2) format('woff2');
+}
+/* pt-serif-cyrillic-700-italic */
+@font-face {
+  font-family: 'PT Serif';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./pt-serif-cyrillic-700-italic.woff2) format('woff2');
+}
+/* lora-latin-400-normal */
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./lora-latin-400-normal.woff2) format('woff2');
+}
+/* lora-latin-400-italic */
+@font-face {
+  font-family: 'Lora';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./lora-latin-400-italic.woff2) format('woff2');
+}
+/* lora-latin-700-normal */
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./lora-latin-700-normal.woff2) format('woff2');
+}
+/* lora-latin-700-italic */
+@font-face {
+  font-family: 'Lora';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./lora-latin-700-italic.woff2) format('woff2');
+}
+/* lora-cyrillic-400-normal */
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./lora-cyrillic-400-normal.woff2) format('woff2');
+}
+/* lora-cyrillic-400-italic */
+@font-face {
+  font-family: 'Lora';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./lora-cyrillic-400-italic.woff2) format('woff2');
+}
+/* lora-cyrillic-700-normal */
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./lora-cyrillic-700-normal.woff2) format('woff2');
+}
+/* lora-cyrillic-700-italic */
+@font-face {
+  font-family: 'Lora';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./lora-cyrillic-700-italic.woff2) format('woff2');
+}
+/* inter-latin-400-normal */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./inter-latin-400-normal.woff2) format('woff2');
+}
+/* inter-latin-400-italic */
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./inter-latin-400-italic.woff2) format('woff2');
+}
+/* inter-latin-700-normal */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./inter-latin-700-normal.woff2) format('woff2');
+}
+/* inter-latin-700-italic */
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./inter-latin-700-italic.woff2) format('woff2');
+}
+/* inter-cyrillic-400-normal */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./inter-cyrillic-400-normal.woff2) format('woff2');
+}
+/* inter-cyrillic-400-italic */
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400;
+  src: url(./inter-cyrillic-400-italic.woff2) format('woff2');
+}
+/* inter-cyrillic-700-normal */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./inter-cyrillic-700-normal.woff2) format('woff2');
+}
+/* inter-cyrillic-700-italic */
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 700;
+  src: url(./inter-cyrillic-700-italic.woff2) format('woff2');
+}

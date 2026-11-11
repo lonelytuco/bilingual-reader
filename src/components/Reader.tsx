@@ -6,6 +6,22 @@ import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabas
 
 type Jump = { cfi?: string; percent?: number } | null;
 
+// Шрифты лежат в /public/fonts (латиница + кириллица), "book" — оставить шрифт издательства
+export const FONTS: { id: string; name: string; css: string | null }[] = [
+  { id: "literata", name: "Literata", css: "'Literata', Georgia, serif" },
+  { id: "pt-serif", name: "PT Serif", css: "'PT Serif', Georgia, serif" },
+  { id: "lora", name: "Lora", css: "'Lora', Georgia, serif" },
+  { id: "georgia", name: "Georgia", css: "Georgia, 'Times New Roman', serif" },
+  { id: "inter", name: "Inter (без засечек)", css: "'Inter', -apple-system, sans-serif" },
+  { id: "system", name: "Системный (San Francisco)", css: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  { id: "book", name: "Как в книге", css: null },
+];
+
+function fontCss(id: string) {
+  const f = FONTS.find((x) => x.id === id);
+  return f?.css ? `body, body p, body div, body span, body li, body blockquote, body h1, body h2, body h3, body h4 { font-family: ${f.css} !important; }` : "";
+}
+
 export default function Reader({ pairId }: { pairId: string }) {
   const viewRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<any>(null);
@@ -14,6 +30,7 @@ export default function Reader({ pairId }: { pairId: string }) {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSaved = useRef<string>("");
   const me = useRef<string>("");
+  const fontRef = useRef<string>("literata");
 
   const [title, setTitle] = useState("");
   const [editions, setEditions] = useState<Edition[]>([]);
@@ -22,7 +39,8 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [percent, setPercent] = useState(0);
   const [cfi, setCfi] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState(110);
-  const [panel, setPanel] = useState<null | "kindle" | "search">(null);
+  const [font, setFont] = useState("literata");
+  const [panel, setPanel] = useState<null | "kindle" | "search" | "type">(null);
   const [remote, setRemote] = useState<Progress | null>(null);
 
   const edition = editions.find((e) => e.id === editionId) ?? null;
@@ -30,7 +48,10 @@ export default function Reader({ pairId }: { pairId: string }) {
   // 1. Загружаем книгу, версии и последнюю позицию
   useEffect(() => {
     me.current = deviceName();
-    try { const fs = Number(localStorage.getItem("fontSize")); if (fs) setFontSize(fs); } catch {}
+    try {
+      const fs = Number(localStorage.getItem("fontSize")); if (fs) setFontSize(fs);
+      const f = localStorage.getItem("font"); if (f && FONTS.some((x) => x.id === f)) { setFont(f); fontRef.current = f; }
+    } catch {}
     (async () => {
       const { data: pair } = await supabase
         .from("book_pairs").select("title, editions(*)").eq("id", pairId).single();
@@ -98,7 +119,6 @@ export default function Reader({ pairId }: { pairId: string }) {
       rendRef.current = rendition;
       rendition.themes.default({
         body: {
-          "font-family": '"Iowan Old Style", Charter, Georgia, serif !important',
           "line-height": "1.6 !important",
           color: "#23201b !important",
           background: "transparent !important",
@@ -111,6 +131,15 @@ export default function Reader({ pairId }: { pairId: string }) {
       // Свайпы и стрелки внутри страницы книги
       rendition.hooks.content.register((contents: any) => {
         const doc = contents.document as Document;
+        // подключаем шрифты и выбранный шрифт внутрь страницы книги
+        const link = doc.createElement("link");
+        link.rel = "stylesheet";
+        link.href = `${window.location.origin}/fonts/fonts.css`;
+        doc.head.appendChild(link);
+        const style = doc.createElement("style");
+        style.id = "user-font";
+        style.textContent = fontCss(fontRef.current);
+        doc.head.appendChild(style);
         let x0 = 0, y0 = 0;
         doc.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
         doc.addEventListener("touchend", (e) => {
@@ -144,6 +173,17 @@ export default function Reader({ pairId }: { pairId: string }) {
     rendRef.current?.themes.fontSize(`${fontSize}%`);
     try { localStorage.setItem("fontSize", String(fontSize)); } catch {}
   }, [fontSize]);
+
+  // Выбор шрифта: применяем к уже открытым страницам и запоминаем
+  useEffect(() => {
+    fontRef.current = font;
+    try { localStorage.setItem("font", font); } catch {}
+    const contents = rendRef.current?.getContents?.() ?? [];
+    for (const c of contents) {
+      const el = c.document?.getElementById("user-font");
+      if (el) el.textContent = fontCss(font);
+    }
+  }, [font]);
 
   // Стрелки на клавиатуре (MacBook)
   const onKey = useCallback((e: KeyboardEvent) => {
@@ -210,8 +250,7 @@ export default function Reader({ pairId }: { pairId: string }) {
             </button>
           ))}
         </div>
-        <button className="btn-ghost px-3" onClick={() => setFontSize((s) => Math.max(70, s - 10))}>A−</button>
-        <button className="btn-ghost px-3" onClick={() => setFontSize((s) => Math.min(200, s + 10))}>A+</button>
+        <button className="btn-ghost px-3" onClick={() => setPanel(panel === "type" ? null : "type")}>Aa</button>
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "search" ? null : "search")}>🔍</button>
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "kindle" ? null : "kindle")}>Kindle</button>
       </header>
@@ -231,6 +270,25 @@ export default function Reader({ pairId }: { pairId: string }) {
         <KindlePanel edition={edition} editions={editions}
           onGo={(p) => { goToPercent(p); setPanel(null); }}
           onSaveTotal={(id, total) => setEditions((all) => all.map((x) => (x.id === id ? { ...x, kindle_total_locs: total } : x)))} />
+      )}
+      {panel === "type" && (
+        <div className="space-y-3 border-b border-line bg-white/60 px-4 py-3 text-sm">
+          <div className="flex items-center gap-3">
+            <span className="w-16 text-muted">Размер</span>
+            <button className="btn-ghost px-4" onClick={() => setFontSize((s) => Math.max(70, s - 10))}>A−</button>
+            <span className="w-12 text-center">{fontSize}%</span>
+            <button className="btn-ghost px-4" onClick={() => setFontSize((s) => Math.min(200, s + 10))}>A+</button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {FONTS.map((f) => (
+              <button key={f.id} onClick={() => setFont(f.id)}
+                style={{ fontFamily: f.css ?? undefined }}
+                className={`rounded-lg border px-3 py-2 text-base ${f.id === font ? "border-ink bg-ink text-paper" : "border-line bg-white hover:border-ink"}`}>
+                {f.name} · Аа
+              </button>
+            ))}
+          </div>
+        </div>
       )}
       {panel === "search" && (
         <SearchPanel book={bookRef.current} onGo={(c) => { rendRef.current?.display(c); setPanel(null); }} />
