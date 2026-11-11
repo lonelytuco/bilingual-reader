@@ -4,9 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabase";
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
-import { sentencesOf, locate, mapPos, countSentences, pointAt, norm, type Sent } from "@/lib/align";
+import { sentencesOf, locate, countSentences, pointAt, norm, type Sent } from "@/lib/align";
 import { translate } from "@/lib/translate";
-import { buildModel, kindleToCfi, estimateFromRendition, estimateToLoc, addAnchor, type KModel, type KAnchor } from "@/lib/kindle";
+import { buildModel, kindleToCfi, locFromRendition, type KModel } from "@/lib/kindle";
 
 type Mark = { cfi: string; text: string };
 type Jump = { cfi?: string; percent?: number; highlight?: Mark } | null;
@@ -125,13 +125,11 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [remote, setRemote] = useState<Progress | null>(null);
   const [sel, setSel] = useState<(Mark & { sec: number }) | null>(null);
   const [hl, setHl] = useState<Mark | null>(null);
-  const [alts, setAlts] = useState<Mark[]>([]);   // запасные варианты найденного места
-  const [altIdx, setAltIdx] = useState(0);
+
   const [xBusy, setXBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Kindle
   const modelsRef = useRef(new Map<string, Promise<KModel>>());
-  const estRef = useRef<number | null>(null); // оценка текущей страницы (до подстройки)
   const [kHint, setKHint] = useState<string | null>(null);
 
   const edition = editions.find((e) => e.id === editionId) ?? null;
@@ -239,22 +237,16 @@ export default function Reader({ pairId }: { pairId: string }) {
     return p;
   }, [getBook]);
 
-  const anchorsOf = useCallback((ed: Edition): KAnchor[] => {
-    if (ed.kindle_anchors?.length) return ed.kindle_anchors;
-    try { return JSON.parse(localStorage.getItem(`kanc:${ed.id}`) ?? "[]"); } catch { return []; }
-  }, []);
-
   /** Пересчитать подсказку «на Kindle ≈ Loc …» для текущей страницы */
   const updateKindleHint = useCallback(async (loc: any) => {
     const ed = editionRef.current, r = rendRef.current;
-    if (!ed || !r || !loc?.start || !ed.kindle_total_locs) { setKHint(null); estRef.current = null; return; }
+    if (!ed || !r || !loc?.start || !ed.kindle_total_locs) { setKHint(null); return; }
     try {
       const m = await getModel(ed);
-      const est = estimateFromRendition(r, m, loc.start.cfi, loc.start.index);
-      estRef.current = est;
-      if (est != null) setKHint(`Kindle ≈ ${estimateToLoc(est, anchorsOf(ed), ed.kindle_total_locs)}`);
-    } catch { /* модель ещё не готова */ }
-  }, [getModel, anchorsOf]);
+      const n = locFromRendition(r, m, loc.start.cfi, loc.start.index, ed.kindle_total_locs);
+      if (n != null) setKHint(`Kindle ${n}`);
+    } catch { /* разметка ещё не готова */ }
+  }, [getModel]);
   const kHintRef = useRef(updateKindleHint);
   kHintRef.current = updateKindleHint;
 
@@ -579,37 +571,18 @@ export default function Reader({ pairId }: { pairId: string }) {
     try {
       setNotice(null);
       const [book, m] = await Promise.all([getBook(ed), getModel(ed)]);
-      const target = kindleToCfi(book, m, anchorsOf(ed), loc, total);
+      const target = kindleToCfi(book, m, loc, total);
       if (!target) throw new Error("не нашёл место");
-      setAlts([]);
-      clearHighlight();
+        clearHighlight();
       if (ed.id === editionId) await displayAt(target);
       else { jumpRef.current = { cfi: target }; setEditionId(ed.id); }
-      setNotice(`Открыл Loc ${loc}. Если на Kindle на этой странице другой номер — открой Kindle-панель и нажми «Подстроить», дальше будет точно.`);
     } catch (e) {
       setNotice("Ошибка: " + (e as Error).message);
     }
   }
 
-  /** Подстройка: «текущая страница на Kindle — это Loc …» */
-  async function calibrateKindle(edId: string, loc: number, total: number) {
-    const ed = editions.find((e) => e.id === edId);
-    if (!ed || ed.id !== editionId) { setNotice("Для подстройки открой на сайте ту же языковую версию, что и на Kindle."); return; }
-    if (estRef.current == null) await updateKindleHint(lastLocRef.current);
-    const est = estRef.current;
-    if (est == null) { setNotice("Не получилось определить текущее место — пролистай страницу и попробуй ещё раз."); return; }
-    const list = addAnchor(anchorsOf(ed), est, loc / total);
-    try { localStorage.setItem(`kanc:${ed.id}`, JSON.stringify(list)); } catch {}
-    setEditions((all) => all.map((x) => (x.id === ed.id ? { ...x, kindle_anchors: list, kindle_total_locs: total } : x)));
-    editionRef.current = { ...ed, kindle_anchors: list, kindle_total_locs: total };
-    await supabase.from("editions").update({ kindle_anchors: list, kindle_total_locs: total }).eq("id", ed.id); // без колонки просто не сохранится в облако
-    await updateKindleHint(lastLocRef.current);
-    setNotice(`Запомнил: эта страница = Loc ${loc}. Переходы с Kindle и обратно теперь будут точнее.`);
-  }
-
   function switchLang(id: string) {
     if (id === editionId) return;
-    setAlts([]);
     jumpRef.current = { percent };
     setEditionId(id);
   }
@@ -638,17 +611,9 @@ export default function Reader({ pairId }: { pairId: string }) {
     } catch {}
   }
 
-  /** Снять подсветку и выделение (и забыть запасные варианты) */
+  /** Снять подсветку и выделение */
   function clearAll() {
     clearHighlight();
-    setAlts([]);
-  }
-
-  function showAlt(k: number) {
-    const m = alts[k];
-    if (!m) return;
-    setAltIdx(k);
-    displayAt(m.cfi).then(() => addHighlight(m));
   }
 
   function clearHighlight() {
@@ -685,45 +650,25 @@ export default function Reader({ pairId }: { pairId: string }) {
         }
       }
 
-      // Опорные точки от прошлых уверенных переходов: насколько версии сдвинуты друг относительно друга
-      const akey = `anc:${edition.id}>${target.id}`, bkey = `anc:${target.id}>${edition.id}`;
-      const loadA = (k: string): [number, number][] => { try { return JSON.parse(localStorage.getItem(k) ?? "[]"); } catch { return []; } };
-      const expected = mapPos(srcPos, loadA(akey));
-
+      // Ищем самое близкое по смыслу место в пределах ±10% книги от той же позиции
+      const pool = tIdx.sents.filter((s) => Math.abs(s.pos - srcPos) <= 0.1);
       const hits = tr.text
-        ? locate(tIdx.sents, tr.text, expected, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text))
+        ? locate(pool, tr.text, srcPos, text.length * (tIdx.total / sIdx.total), tr.truncated, countSentences(text))
         : [];
 
       clearAll();
-      if (hits.length && hits[0].sim >= 0.12) {
+      if (hits.length && hits[0].sim >= 0.1) {
         const tb = await getBook(target);
-        const marks: Mark[] = hits.map((h) => {
-          const s = tIdx.sents[h.start], e = tIdx.sents[h.end];
-          const range = s.el.ownerDocument.createRange();
-          range.setStart(...pointAt(s.el, s.start));
-          range.setEnd(...pointAt(e.el, e.end));
-          return { cfi: tb.spine.get(s.sec).cfiFromRange(range), text: range.toString() };
-        });
-        jumpRef.current = { cfi: marks[0].cfi, highlight: marks[0] };
-        setAlts(marks);
-        setAltIdx(0);
-        const sure = hits[0].sim >= 0.4 && (hits.length < 2 || hits[0].score - hits[1].score >= 0.08);
-        if (sure) {
-          // запоминаем соответствие позиций в обе стороны
-          const tPos = tIdx.sents[hits[0].start].pos;
-          const add = (k: string, a: number, b: number) => {
-            const list = loadA(k).filter(([x]) => Math.abs(x - a) > 0.01);
-            list.push([a, b]);
-            try { localStorage.setItem(k, JSON.stringify(list.slice(-40))); } catch {}
-          };
-          add(akey, srcPos, tPos);
-          add(bkey, tPos, srcPos);
-        } else if (hits.length > 1) {
-          setNotice("Не уверен на 100% — если подсвечено не то, переключи вариант стрелками ‹ › сверху.");
-        }
+        const h = hits[0];
+        const s = pool[h.start], e = pool[h.end];
+        const range = s.el.ownerDocument.createRange();
+        range.setStart(...pointAt(s.el, s.start));
+        range.setEnd(...pointAt(e.el, e.end));
+        const mark = { cfi: tb.spine.get(s.sec).cfiFromRange(range), text: range.toString() };
+        jumpRef.current = { cfi: mark.cfi, highlight: mark };
       } else {
-        jumpRef.current = { percent: mapPos(srcPos, loadA(akey)) };
-        if (tr.text) setNotice("Точно не нашёл — открыл примерно то же место.");
+        jumpRef.current = { percent: srcPos };
+        if (tr.text) setNotice("Похожего места рядом не нашлось — открыл ту же позицию в книге.");
       }
       setEditionId(target.id);
     } catch (e) {
@@ -766,14 +711,6 @@ export default function Reader({ pairId }: { pairId: string }) {
               Найти в {e.lang} →
             </button>
           ))}
-          {!xBusy && !sel && hl && alts.length > 1 && (
-            <div className="flex shrink-0 items-center gap-1">
-              <span className="hidden text-muted sm:inline">Не то место?</span>
-              <button className="btn-ghost px-2 py-1" onClick={() => showAlt((altIdx + alts.length - 1) % alts.length)}>‹</button>
-              <span className="w-12 text-center text-muted">{altIdx + 1} из {alts.length}</span>
-              <button className="btn-ghost px-2 py-1" onClick={() => showAlt((altIdx + 1) % alts.length)}>›</button>
-            </div>
-          )}
           {!xBusy && (
             <button className="btn-ghost shrink-0 py-1" onClick={clearAll} title="Снять выделение">
               ✕ Снять
@@ -802,7 +739,7 @@ export default function Reader({ pairId }: { pairId: string }) {
         <KindlePanel edition={edition} editions={editions}
           onGo={(id, loc, total) => { goKindle(id, loc, total); setPanel(null); }}
           onPercent={(p) => { goToPercent(p); setPanel(null); }}
-          onCalibrate={(id, loc, total) => { calibrateKindle(id, loc, total); setPanel(null); }}
+          getTotal={async (id) => { const e = editions.find((x) => x.id === id); return e ? (await getModel(e)).total : null; }}
           onSaveTotal={(id, total) => setEditions((all) => all.map((x) => (x.id === id ? { ...x, kindle_total_locs: total } : x)))} />
       )}
       {panel === "type" && (
@@ -863,11 +800,11 @@ export default function Reader({ pairId }: { pairId: string }) {
   );
 }
 
-function KindlePanel({ edition, editions, onGo, onPercent, onCalibrate, onSaveTotal }: {
+function KindlePanel({ edition, editions, onGo, onPercent, getTotal, onSaveTotal }: {
   edition: Edition; editions: Edition[];
   onGo: (edId: string, loc: number, total: number) => void;
   onPercent: (p: number) => void;
-  onCalibrate: (edId: string, loc: number, total: number) => void;
+  getTotal: (edId: string) => Promise<number | null>;
   onSaveTotal: (id: string, total: number) => void;
 }) {
   const [edId, setEdId] = useState(edition.kindle_total_locs ? edition.id : (editions.find((e) => e.kindle_total_locs)?.id ?? edition.id));
@@ -875,57 +812,44 @@ function KindlePanel({ edition, editions, onGo, onPercent, onCalibrate, onSaveTo
   const [loc, setLoc] = useState("");
   const [total, setTotal] = useState(ed.kindle_total_locs ? String(ed.kindle_total_locs) : "");
   const [pct, setPct] = useState("");
-  const [cal, setCal] = useState("");
+  const [calc, setCalc] = useState<number | null>(null);
 
-  async function saveTotal(t: number) {
-    if (t !== ed.kindle_total_locs) {
-      await supabase.from("editions").update({ kindle_total_locs: t }).eq("id", ed.id);
-      onSaveTotal(ed.id, t);
-    }
-  }
+  useEffect(() => { setCalc(null); getTotal(edId).then(setCalc).catch(() => {}); }, [edId, getTotal]);
+
   async function go() {
     if (pct) return onPercent(Number(pct.replace(",", ".")) / 100);
     const l = Number(loc), t = Number(total);
     if (!l || !t) return;
-    await saveTotal(t);
+    if (t !== ed.kindle_total_locs) {
+      await supabase.from("editions").update({ kindle_total_locs: t }).eq("id", ed.id);
+      onSaveTotal(ed.id, t);
+    }
     onGo(ed.id, l, t);
   }
-  async function calibrate() {
-    const l = Number(cal), t = Number(total);
-    if (!l || !t) return;
-    await saveTotal(t);
-    onCalibrate(ed.id, l, t);
-  }
-  const calibrated = (ed.kindle_anchors?.length ?? 0) > 0;
+  const t = Number(total);
+  const diff = calc && t ? Math.abs(calc - t) / t : null;
 
   return (
     <div className="space-y-3 border-b border-line bg-card/60 px-4 py-3 text-sm">
-      <div className="text-muted">
-        На Kindle открой меню — внизу «Loc 2115 of 18426» (или «Позиция … из …»). Введи оба числа;
-        общее число запомнится.
-      </div>
       <div className="flex flex-wrap items-center gap-2">
-        <span>Книга на Kindle —</span>
+        <span>Kindle:</span>
         <select className="input w-20 py-1" value={edId}
           onChange={(e) => { setEdId(e.target.value); const n = editions.find((x) => x.id === e.target.value); setTotal(n?.kindle_total_locs ? String(n.kindle_total_locs) : ""); }}>
           {editions.map((e) => <option key={e.id} value={e.id}>{e.lang}</option>)}
         </select>
-        <input className="input w-24 py-1" inputMode="numeric" placeholder="Loc" value={loc} onChange={(e) => setLoc(e.target.value)} />
+        <input className="input w-24 py-1" inputMode="numeric" placeholder="Loc" value={loc} autoFocus onChange={(e) => setLoc(e.target.value)} />
         <span>из</span>
         <input className="input w-24 py-1" inputMode="numeric" placeholder="всего" value={total} onChange={(e) => setTotal(e.target.value)} />
         <span className="text-muted">или</span>
         <input className="input w-20 py-1" inputMode="decimal" placeholder="%" value={pct} onChange={(e) => setPct(e.target.value)} />
         <button className="btn-primary py-1" onClick={go}>Перейти</button>
       </div>
-      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
-        <span>Подстройка: эта страница на Kindle —</span>
-        <input className="input w-24 py-1" inputMode="numeric" placeholder="Loc" value={cal} onChange={(e) => setCal(e.target.value)} />
-        <button className="btn-ghost py-1" onClick={calibrate} disabled={!total}>Подстроить</button>
-        {calibrated && <span className="text-muted">✓ подстроено ({ed.kindle_anchors!.length})</span>}
-      </div>
       <div className="text-muted">
-        Если после перехода на Kindle на той же странице другой Loc — введи его в «Подстройку».
-        Одной-двух подстроек (в начале и дальше по книге) обычно хватает, чтобы попадать точно.
+        {calc == null ? "Считаю локации книги…" : (
+          <>По расчёту в этой книге {calc.toLocaleString("ru")} локаций
+            {diff != null && (diff < 0.003 ? " — совпадает с Kindle ✓" : ` (на Kindle ${t.toLocaleString("ru")} — сборка немного отличается, пересчитаю пропорционально)`)}.
+          </>
+        )}
       </div>
     </div>
   );
