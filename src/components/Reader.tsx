@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { supabase, deviceName, type Edition, type Progress } from "@/lib/supabase";
+import { supabase, deviceName, saveProgressKeepalive, type Edition, type Progress } from "@/lib/supabase";
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
 import { sentencesOf, locate, countSentences, pointAt, norm, type Sent } from "@/lib/align";
 import { translate } from "@/lib/translate";
@@ -94,6 +94,9 @@ export default function Reader({ pairId }: { pairId: string }) {
   const jumpRef = useRef<Jump>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSaved = useRef<string>("");
+  const pendingSave = useRef<any>(null);   // позиция, которую ещё не отправили на сервер
+  const authRef = useRef<{ uid: string; token: string } | null>(null);
+  const readyRef = useRef(false);          // книга открыта на нужном месте — можно сохранять
   const me = useRef<string>("");
   const fontRef = useRef<string>("literata");
   const fontSizeRef = useRef<number>(110);
@@ -156,7 +159,11 @@ export default function Reader({ pairId }: { pairId: string }) {
       setTitle(pair.title);
       const eds = (pair.editions as Edition[]).sort((x, y) => x.lang.localeCompare(y.lang));
       setEditions(eds);
-      const { data: prog } = await supabase.from("progress").select("*").eq("pair_id", pairId).maybeSingle();
+      const { data: server } = await supabase.from("progress").select("*").eq("pair_id", pairId).maybeSingle();
+      // позиция на этом устройстве (пишется сразу при каждом перелистывании) — берём ту, что новее
+      let local: any = null;
+      try { local = JSON.parse(localStorage.getItem(`pos:${pairId}`) ?? "null"); } catch {}
+      const prog = local && (!server || local.updated_at > server.updated_at) ? local : server;
       if (prog?.edition_id && eds.some((e) => e.id === prog.edition_id)) {
         jumpRef.current = { cfi: prog.cfi ?? undefined, percent: prog.percent ?? undefined };
         lastSaved.current = prog.updated_at;
@@ -165,20 +172,55 @@ export default function Reader({ pairId }: { pairId: string }) {
     })();
   }, [pairId]);
 
-  // 2. Сохранение позиции (с небольшой задержкой, чтобы не писать на каждой странице)
+  // 2. Сохранение позиции.
+  //    • сразу — на этом устройстве (localStorage), чтобы ничего не потерялось;
+  //    • через полсекунды — на сервер (для других устройств); при уходе со страницы — немедленно.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) authRef.current = { uid: data.session.user.id, token: data.session.access_token };
+    });
+    const { data } = supabase.auth.onAuthStateChange((_e, sess) => {
+      authRef.current = sess ? { uid: sess.user.id, token: sess.access_token } : null;
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
+
+  const flush = useCallback(() => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+    const row = pendingSave.current, a = authRef.current;
+    if (!row || !a) return;
+    pendingSave.current = null;
+    saveProgressKeepalive({ ...row, user_id: a.uid }, a.token).catch(() => {
+      // не получилось — попробуем ещё раз обычным способом
+      supabase.from("progress").upsert(row).then(() => {}, () => {});
+    });
+  }, []);
+
   const save = useCallback(
     (c: string, p: number, edId: string) => {
+      if (!readyRef.current) return; // книга ещё открывается — не затираем сохранённое место
+      const updated_at = new Date().toISOString();
+      const row = { pair_id: pairId, edition_id: edId, cfi: c, percent: p, device: me.current, updated_at };
+      lastSaved.current = updated_at;
+      try { localStorage.setItem(`pos:${pairId}`, JSON.stringify(row)); } catch {}
+      pendingSave.current = row;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
-        const updated_at = new Date().toISOString();
-        lastSaved.current = updated_at;
-        await supabase.from("progress").upsert({
-          pair_id: pairId, edition_id: edId, cfi: c, percent: p, device: me.current, updated_at,
-        });
-      }, 1200);
+      saveTimer.current = setTimeout(flush, 500);
     },
-    [pairId]
+    [pairId, flush]
   );
+
+  // Ушёл со страницы / свернул приложение / вернулся в библиотеку — отправляем сразу
+  useEffect(() => {
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, [flush]);
 
   // Книга одной версии (кэшируется). Разметка позиций — куски по ~1000 знаков, только для % и синхронизации.
   const getBook = useCallback((ed: Edition, onStatus?: (s: string) => void): Promise<any> => {
@@ -336,6 +378,7 @@ export default function Reader({ pairId }: { pairId: string }) {
     const ed = edition;
     (async () => {
       setStatus("Открываю книгу…");
+      readyRef.current = false;
       disposeRef.current?.();
       disposeRef.current = null;
       rendRef.current = null;
@@ -396,8 +439,18 @@ export default function Reader({ pairId }: { pairId: string }) {
       let target: string | undefined;
       if (j?.cfi) target = j.cfi;
       else if (j?.percent != null) target = book.locations.cfiFromPercentage(j.percent);
-      await displayAt(target);
+      try {
+        await displayAt(target);
+      } catch {
+        // сохранённое место не открылось — открываем по проценту, а не с начала книги
+        if (j?.percent != null) await displayAt(book.locations.cfiFromPercentage(j.percent));
+        else await displayAt();
+      }
       if (cancelled) return;
+      readyRef.current = true;
+      // запоминаем место, на котором книга реально открылась
+      const cur = rendition.currentLocation?.();
+      if (cur?.start?.cfi) save(cur.start.cfi, book.locations.percentageFromCfi(cur.start.cfi) ?? 0, ed.id);
       setStatus(null);
       if (j?.highlight) addHighlight(j.highlight);
       paginate();

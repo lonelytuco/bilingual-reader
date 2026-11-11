@@ -2,11 +2,14 @@ import { createClient } from "@supabase/supabase-js";
 
 // Оба значения публичные (их и так видно в браузере); данные защищены правилами доступа в базе.
 // Можно переопределить через переменные окружения в Vercel.
-const url =
+export const SUPABASE_URL_PUBLIC =
   process.env.NEXT_PUBLIC_SUPABASE_URL ?? "https://fhvjoqukvisnaofytgjt.supabase.co";
-const key =
+export const SUPABASE_KEY_PUBLIC =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
   "sb_publishable_JFQSDa-b_rj5pN-pazQg_g_ihbUs9oF";
+
+const url = SUPABASE_URL_PUBLIC;
+const key = SUPABASE_KEY_PUBLIC;
 
 export const supabase = createClient(url, key, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
@@ -40,4 +43,25 @@ export function deviceName(): string {
   if (/Android/.test(ua)) return "Android";
   if (/Windows/.test(ua)) return "Windows";
   return "браузер";
+}
+
+/**
+ * Сохранить позицию так, чтобы запрос не оборвался при закрытии вкладки/приложения
+ * (keepalive — браузер дошлёт его даже после ухода со страницы).
+ */
+export async function saveProgressKeepalive(row: {
+  user_id: string; pair_id: string; edition_id: string; cfi: string; percent: number; device: string; updated_at: string;
+}, accessToken: string) {
+  const r = await fetch(`${url}/rest/v1/progress?on_conflict=user_id,pair_id`, {
+    method: "POST",
+    keepalive: true,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify([row]),
+  });
+  if (!r.ok) throw new Error(`progress save failed: ${r.status}`);
 }
