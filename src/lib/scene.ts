@@ -1,0 +1,85 @@
+"use client";
+/**
+ * Картинка «где мы остановились»: поиск уже нарисованной для этого места и рисование новой.
+ */
+import { supabase } from "@/lib/supabase";
+
+export type Scene = { caption: string; url: string | null; note?: string };
+
+const NEAR = 0.008; // ±0.8% книги — считаем «тем же местом»
+
+async function token(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+}
+
+/** Уже нарисованная картинка для этого места (если есть) */
+export async function findCachedScene(pairId: string, editionId: string, pos: number): Promise<Scene | null> {
+  const { data, error } = await supabase
+    .from("scenes").select("edition_id,pos,caption,image_path,created_at")
+    .eq("pair_id", pairId).order("created_at", { ascending: false });
+  if (error || !data) return null;
+  const near = data.filter((s: any) => Math.abs(s.pos - pos) <= NEAR && s.image_path);
+  const best = near.find((s: any) => s.edition_id === editionId) ?? near[0];
+  if (!best) return null;
+  const { data: signed } = await supabase.storage.from("scenes").createSignedUrl(best.image_path, 60 * 60);
+  return signed?.signedUrl ? { caption: best.caption ?? "", url: signed.signedUrl } : null;
+}
+
+export class SceneError extends Error {
+  constructor(public code: string, message: string) { super(message); }
+}
+
+/** Нарисовать новую картинку. onCaption вызывается сразу, как только готов пересказ (картинка — позже). */
+export async function generateScene(opts: {
+  pairId: string; editionId: string; pos: number; title: string; text: string;
+  onCaption?: (c: string) => void; signal?: { cancelled: boolean };
+}): Promise<Scene> {
+  const t = await token();
+  if (!t) throw new SceneError("unauthorized", "Нужно войти заново.");
+  const auth = { Authorization: `Bearer ${t}` };
+
+  const r = await fetch("/api/scene", {
+    method: "POST",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: opts.text, title: opts.title }),
+  });
+  if (r.status === 501) throw new SceneError("not_configured", "Картинки ещё не подключены: нужен ключ Яндекса в настройках Vercel.");
+  if (r.status === 401) throw new SceneError("unauthorized", "Нет доступа к рисованию (проверь ALLOWED_EMAILS в Vercel).");
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new SceneError("failed", "Не получилось разобрать сцену. Попробуй ещё раз позже.");
+  const caption: string = j.caption ?? "";
+  if (caption) opts.onCaption?.(caption);
+  if (!j.op) return { caption, url: null, note: "Картинку нарисовать не получилось — только пересказ." };
+
+  // Ждём картинку (обычно 10–30 секунд)
+  let image: string | null = null;
+  for (let i = 0; i < 45; i++) {
+    await new Promise((res) => setTimeout(res, i === 0 ? 6000 : 2500));
+    if (opts.signal?.cancelled) throw new SceneError("cancelled", "");
+    const p = await fetch(`/api/scene?op=${encodeURIComponent(j.op)}`, { headers: auth });
+    const pj = await p.json().catch(() => ({}));
+    if (pj.done) {
+      if (!pj.image) return { caption, url: null, note: "Картинку нарисовать не получилось — только пересказ." };
+      image = pj.image;
+      break;
+    }
+  }
+  if (!image) return { caption, url: null, note: "Картинка рисуется слишком долго — попробуй позже." };
+
+  // Сохраняем, чтобы в следующий раз показать сразу
+  const bytes = Uint8Array.from(atob(image), (ch) => ch.charCodeAt(0));
+  const blob = new Blob([bytes], { type: "image/jpeg" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const { data: u } = await supabase.auth.getUser();
+    const path = `${u.user!.id}/${opts.pairId}/${Date.now()}.jpg`;
+    const up = await supabase.storage.from("scenes").upload(path, blob, { contentType: "image/jpeg" });
+    if (!up.error) {
+      await supabase.from("scenes").insert({
+        pair_id: opts.pairId, edition_id: opts.editionId, pos: opts.pos, caption, image_path: path,
+      });
+    }
+  } catch { /* не сохранилось — не страшно, покажем всё равно */ }
+  return { caption, url };
+}

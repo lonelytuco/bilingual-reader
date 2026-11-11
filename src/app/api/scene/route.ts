@@ -1,0 +1,112 @@
+/**
+ * Картинка «где мы остановились»: YandexGPT выбирает сцену и пишет пересказ, YandexART рисует.
+ *
+ * POST /api/scene        { text, title }  → { caption, op }   (запускает рисование)
+ * GET  /api/scene?op=ID                   → { done, image? }  (base64 JPEG, когда готово)
+ *
+ * Нужны переменные окружения в Vercel: YANDEX_API_KEY, YANDEX_FOLDER_ID.
+ * Необязательно: ALLOWED_EMAILS — через запятую, кому разрешено (чтобы чужие не тратили твой баланс).
+ */
+import { createClient } from "@supabase/supabase-js";
+import { SUPABASE_URL_PUBLIC, SUPABASE_KEY_PUBLIC } from "@/lib/supabase";
+
+const API = "https://llm.api.cloud.yandex.net";
+
+// Стиль: плоский минимализм
+const STYLE =
+  "Плоская минималистичная иллюстрация в стиле обложек Penguin и постеров Сола Басса: " +
+  "2–3 приглушённых цвета, крупные простые силуэты, геометричные формы, много пустого пространства, " +
+  "лёгкая бумажная текстура, без мелких деталей, без текста и надписей.";
+
+const SYSTEM =
+  "Ты — арт-директор книжных иллюстраций. Тебе дают фрагмент книги, который читатель только что прочитал. " +
+  "Выбери ОДНУ ключевую сцену из самого конца фрагмента (то, что происходит прямо сейчас). " +
+  'Ответь строго JSON без пояснений: {"caption": "...", "prompt": "..."}. ' +
+  "caption — по-русски, 1–2 коротких предложения: что сейчас происходит, с именами героев, чтобы читатель быстро вспомнил. " +
+  "prompt — по-русски, до 350 символов: что нарисовать (место, время суток, 1–2 фигуры и их действие, ключевой предмет, настроение). " +
+  "В prompt не используй имена собственные и названия, только описания (например «пожилой смотритель маяка»). " +
+  "Не описывай жестокость и откровенные сцены — выбери спокойный кадр с тем же смыслом.";
+
+async function authorize(req: Request): Promise<string | null> {
+  const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  const sb = createClient(SUPABASE_URL_PUBLIC, SUPABASE_KEY_PUBLIC, { auth: { persistSession: false } });
+  const { data } = await sb.auth.getUser(token);
+  const email = data.user?.email?.toLowerCase();
+  if (!email) return null;
+  const allowed = (process.env.ALLOWED_EMAILS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (allowed.length && !allowed.includes(email)) return null;
+  return email;
+}
+
+function config() {
+  const key = process.env.YANDEX_API_KEY, folder = process.env.YANDEX_FOLDER_ID;
+  return key && folder ? { key, folder } : null;
+}
+
+const headers = (c: { key: string; folder: string }) => ({
+  Authorization: `Api-Key ${c.key}`,
+  "x-folder-id": c.folder,
+  "Content-Type": "application/json",
+});
+
+function parseJson(s: string): { caption?: string; prompt?: string } {
+  const m = s.match(/\{[\s\S]*\}/);
+  try { return JSON.parse(m ? m[0] : s); } catch { return {}; }
+}
+
+export async function POST(req: Request) {
+  const c = config();
+  if (!c) return Response.json({ error: "not_configured" }, { status: 501 });
+  if (!(await authorize(req))) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+  const { text, title } = await req.json();
+  if (!text || typeof text !== "string") return Response.json({ error: "no_text" }, { status: 400 });
+
+  // 1) Сцена и пересказ
+  const g = await fetch(`${API}/foundationModels/v1/completion`, {
+    method: "POST",
+    headers: headers(c),
+    body: JSON.stringify({
+      modelUri: `gpt://${c.folder}/yandexgpt/latest`,
+      completionOptions: { stream: false, temperature: 0.3, maxTokens: "600" },
+      messages: [
+        { role: "system", text: SYSTEM },
+        { role: "user", text: `Книга: «${String(title ?? "").slice(0, 200)}»\n\nФрагмент:\n${text.slice(-6000)}` },
+      ],
+    }),
+  });
+  if (!g.ok) return Response.json({ error: "gpt_failed", detail: (await g.text()).slice(0, 500) }, { status: 502 });
+  const gj = await g.json();
+  const out: string = gj?.result?.alternatives?.[0]?.message?.text ?? "";
+  const { caption = "", prompt = "" } = parseJson(out);
+  const scene = (prompt || caption || out).replace(/\s+/g, " ").slice(0, 400);
+
+  // 2) Запускаем рисование (асинхронно — результат забираем через GET)
+  const a = await fetch(`${API}/foundationModels/v1/imageGenerationAsync`, {
+    method: "POST",
+    headers: headers(c),
+    body: JSON.stringify({
+      modelUri: `art://${c.folder}/yandex-art/latest`,
+      generationOptions: { seed: String(Math.floor(Math.random() * 1e9)), aspectRatio: { widthRatio: "16", heightRatio: "9" } },
+      messages: [{ weight: "1", text: `${scene} ${STYLE}`.slice(0, 500) }],
+    }),
+  });
+  if (!a.ok) return Response.json({ caption, error: "art_failed", detail: (await a.text()).slice(0, 500) }, { status: 200 });
+  const aj = await a.json();
+  return Response.json({ caption, op: aj.id });
+}
+
+export async function GET(req: Request) {
+  const c = config();
+  if (!c) return Response.json({ error: "not_configured" }, { status: 501 });
+  if (!(await authorize(req))) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const op = new URL(req.url).searchParams.get("op");
+  if (!op || !/^[\w-]+$/.test(op)) return Response.json({ error: "bad_op" }, { status: 400 });
+  const r = await fetch(`${API}/operations/${op}`, { headers: headers(c) });
+  if (!r.ok) return Response.json({ error: "poll_failed" }, { status: 502 });
+  const j = await r.json();
+  if (j.error) return Response.json({ done: true, error: j.error.message ?? "generation_failed" });
+  if (!j.done) return Response.json({ done: false });
+  return Response.json({ done: true, image: j.response?.image ?? null });
+}

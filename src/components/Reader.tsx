@@ -6,6 +6,7 @@ import { supabase, deviceName, saveProgressKeepalive, type Edition, type Progres
 import { useTheme, setTheme, THEMES, READER_COLORS } from "@/lib/theme";
 import { sentencesOf, locate, countSentences, pointAt, norm, type Sent } from "@/lib/align";
 import { translate } from "@/lib/translate";
+import { findCachedScene, generateScene, SceneError } from "@/lib/scene";
 import { buildModel, kindleToCfi, locFromRendition, type KModel } from "@/lib/kindle";
 
 type Mark = { cfi: string; text: string };
@@ -136,6 +137,12 @@ export default function Reader({ pairId }: { pairId: string }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewLang, setPreviewLang] = useState<string | null>(null);
   const prevTok = useRef(0);
+  // Картинка «где мы остановились»
+  type SceneView = { status: "loading" | "ready" | "error"; caption?: string; url?: string | null; note?: string };
+  const [scene, setScene] = useState<SceneView | null>(null);
+  const sceneTok = useRef({ cancelled: false });
+  const sessionGapRef = useRef<number>(0); // сколько прошло с прошлого чтения на момент открытия
+  const autoSceneDone = useRef(false);
   // Kindle
   const modelsRef = useRef(new Map<string, Promise<KModel>>());
   const [kHint, setKHint] = useState<string | null>(null);
@@ -164,6 +171,7 @@ export default function Reader({ pairId }: { pairId: string }) {
       let local: any = null;
       try { local = JSON.parse(localStorage.getItem(`pos:${pairId}`) ?? "null"); } catch {}
       const prog = local && (!server || local.updated_at > server.updated_at) ? local : server;
+      sessionGapRef.current = prog?.updated_at ? Date.now() - Date.parse(prog.updated_at) : 0;
       if (prog?.edition_id && eds.some((e) => e.id === prog.edition_id)) {
         jumpRef.current = { cfi: prog.cfi ?? undefined, percent: prog.percent ?? undefined };
         lastSaved.current = prog.updated_at;
@@ -448,6 +456,13 @@ export default function Reader({ pairId }: { pairId: string }) {
       }
       if (cancelled) return;
       readyRef.current = true;
+      // вернулся к книге после перерыва — показываем, что происходит
+      if (!autoSceneDone.current && sessionGapRef.current > 20 * 60 * 1000) {
+        autoSceneDone.current = true;
+        let off = false;
+        try { off = sessionStorage.getItem("scene:off") === "1"; } catch {}
+        if (!off) setTimeout(() => sceneRef.current(false), 300);
+      }
       // запоминаем место, на котором книга реально открылась
       const cur = rendition.currentLocation?.();
       if (cur?.start?.cfi) save(cur.start.cfi, book.locations.percentageFromCfi(cur.start.cfi) ?? 0, ed.id);
@@ -639,6 +654,47 @@ export default function Reader({ pairId }: { pairId: string }) {
     }
   }
 
+  /** Показать картинку для текущего места: из сохранённых или нарисовать новую */
+  async function showScene(force: boolean) {
+    const ed = editionRef.current;
+    if (!ed) return;
+    sceneTok.current.cancelled = true;
+    const tok = { cancelled: false };
+    sceneTok.current = tok;
+    const pos = percent;
+    setScene({ status: "loading" });
+    try {
+      if (!force) {
+        const cached = await findCachedScene(pairId, ed.id, pos);
+        if (tok.cancelled) return;
+        if (cached) { setScene({ status: "ready", ...cached }); return; }
+      }
+      // текст перед текущим местом (~2 страницы)
+      const idx = await textIndex(ed);
+      const before = idx.sents.filter((s) => s.pos <= pos + 0.002);
+      let text = "";
+      for (let i = before.length - 1; i >= 0 && text.length < 3500; i--) text = before[i].text + " " + text;
+      if (!text.trim()) { setScene({ status: "error", note: "Здесь пока нечего рисовать — начни читать." }); return; }
+      const res = await generateScene({
+        pairId, editionId: ed.id, pos, title, text, signal: tok,
+        onCaption: (c) => { if (!tok.cancelled) setScene({ status: "loading", caption: c }); },
+      });
+      if (!tok.cancelled) setScene({ status: res.url ? "ready" : "error", ...res });
+    } catch (e) {
+      if (tok.cancelled) return;
+      const code = e instanceof SceneError ? e.code : "failed";
+      if (code === "not_configured") { try { sessionStorage.setItem("scene:off", "1"); } catch {} }
+      setScene((s) => ({ status: "error", caption: s?.caption, note: (e as Error).message || "Не получилось нарисовать." }));
+    }
+  }
+  const sceneRef = useRef(showScene);
+  sceneRef.current = showScene;
+
+  function closeScene() {
+    sceneTok.current.cancelled = true;
+    setScene(null);
+  }
+
   function switchLang(id: string) {
     if (id === editionId) return;
     jumpRef.current = { percent };
@@ -788,6 +844,7 @@ export default function Reader({ pairId }: { pairId: string }) {
             </button>
           ))}
         </div>
+        <button className="btn-ghost px-3" onClick={() => showScene(false)} title="Что сейчас происходит">🖼</button>
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "type" ? null : "type")}>Aa</button>
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "search" ? null : "search")}>🔍</button>
         <button className="btn-ghost px-3" onClick={() => setPanel(panel === "kindle" ? null : "kindle")}>Kindle</button>
@@ -907,6 +964,30 @@ export default function Reader({ pairId }: { pairId: string }) {
         </div>
         {status && (
           <div className="absolute inset-0 flex items-center justify-center bg-paper text-muted">{status}</div>
+        )}
+        {scene && !status && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-paper/85 p-4 backdrop-blur-sm" onClick={closeScene}>
+            <div className="w-full max-w-xl rounded-2xl border border-line bg-card p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-3 text-xs uppercase tracking-widest text-muted">Где мы остановились</div>
+              <div className="relative aspect-video overflow-hidden rounded-xl bg-line">
+                {scene.url
+                  ? <img src={scene.url} alt={scene.caption ?? "Сцена"} className="h-full w-full object-cover" />
+                  : scene.status === "loading"
+                    ? <div className="flex h-full w-full animate-pulse items-center justify-center text-sm text-muted">Рисую сцену…</div>
+                    : <div className="flex h-full w-full items-center justify-center p-6 text-center text-sm text-muted">{scene.note}</div>}
+              </div>
+              {scene.caption
+                ? <p className="serif mt-3 text-lg leading-snug">{scene.caption}</p>
+                : scene.status === "loading" && <p className="mt-3 animate-pulse text-muted">Вспоминаю, что происходит…</p>}
+              {scene.url && scene.note && <p className="mt-1 text-xs text-muted">{scene.note}</p>}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button className="btn-primary" onClick={closeScene}>Читать дальше</button>
+                {scene.status !== "loading" && (
+                  <button className="btn-ghost" onClick={() => showScene(true)}>Нарисовать заново</button>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </div>
 
